@@ -45,9 +45,11 @@ def test_handler_publishes_one_message_per_company(aws_resources: dict) -> None:
     result = handler({}, None)
 
     assert result["published"] == 2
-    messages = aws_resources["sqs"].receive_message(
-        QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10
-    ).get("Messages", [])
+    messages = (
+        aws_resources["sqs"]
+        .receive_message(QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10)
+        .get("Messages", [])
+    )
     assert len(messages) == 2
 
 
@@ -56,9 +58,11 @@ def test_handler_empty_table(aws_resources: dict) -> None:
     result = handler({}, None)
 
     assert result["published"] == 0
-    messages = aws_resources["sqs"].receive_message(
-        QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10
-    ).get("Messages", [])
+    messages = (
+        aws_resources["sqs"]
+        .receive_message(QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10)
+        .get("Messages", [])
+    )
     assert len(messages) == 0
 
 
@@ -70,9 +74,11 @@ def test_handler_message_body_shape(aws_resources: dict) -> None:
 
     handler({}, None)
 
-    messages = aws_resources["sqs"].receive_message(
-        QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=1
-    ).get("Messages", [])
+    messages = (
+        aws_resources["sqs"]
+        .receive_message(QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=1)
+        .get("Messages", [])
+    )
     body = json.loads(messages[0]["Body"])
     assert body["company_name"] == "Acme Corp"
     assert body["careers_url"] == "https://acme.com/jobs"
