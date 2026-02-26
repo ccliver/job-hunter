@@ -4,12 +4,6 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
-variable "environment" {
-  description = "Deployment environment tag (e.g. prod, staging)"
-  type        = string
-  default     = "prod"
-}
-
 variable "ses_from_address" {
   description = "Verified SES sender email address"
   type        = string

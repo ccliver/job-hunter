@@ -25,13 +25,12 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project     = "job-hunter"
-      Environment = var.environment
-      ManagedBy   = "terraform"
+      Project   = "job-hunter"
+      ManagedBy = "terraform"
     }
   }
 }
 
 locals {
-  prefix = "job-hunter-${var.environment}"
+  prefix = "job-hunter"
 }
