@@ -6,6 +6,7 @@ dev-dependencies = [
     "pytest>=8.0",
     "ruff>=0.9",
     "ty>=0.0.1a13",
+    "moto[all]>=5.0",
 ]
 
 [tool.ruff]
