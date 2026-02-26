@@ -90,11 +90,9 @@ job-hunter/
     ├── main.tf
     ├── variables.tf
     ├── outputs.tf
-    ├── dynamodb.tf
-    ├── eventbridge.tf
-    ├── iam.tf
-    ├── lambda.tf
-    └── sqs.tf
+    ├── versions.tf
+    ├── providers.tf
+    └── backend.tf
 ```
 
 ## Local Development

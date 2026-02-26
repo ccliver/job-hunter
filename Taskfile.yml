@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+env:
+  AWS_PROFILE: lab
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task -l
+
+  deploy:
+    desc: Deploy job hunter infrastructure
+    dir: terraform
+    silent: true
+    cmds:
+      - terraform init -backend-config=backend.hcl
+      - terraform apply -auto-approve
+
+  destroy:
+    desc: Destroy job hunter infrastructure
+    dir: terraform
+    silent: true
+    cmds:
+      - terraform destroy -auto-approve
