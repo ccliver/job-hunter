@@ -1,0 +1,49 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty (type check)
+        language: system
+        entry: uv run ty check src/
+        pass_filenames: false
+        types: [python]
+
+      - id: pytest
+        name: pytest
+        language: system
+        entry: uv run pytest
+        pass_filenames: false
+        types: [python]
+        stages: [pre-push]
+
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.100.0
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+        args:
+          - '--hook-config=--retry-once-with-cleanup=true'
+      - id: terraform_docs
+        args:
+          - '--hook-config=--add-to-existing-file=true'
+          - '--args=--lockfile=false'
+      - id: terraform_tflint
+        args:
+          - '--args=--init'
+      - id: terraform_trivy
+        args:
+          - '--args=--tf-exclude-downloaded-modules'
+          - '--args=--skip-dirs="**/.terraform,.venv"'
+          - '--args=--severity HIGH,CRITICAL'
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
