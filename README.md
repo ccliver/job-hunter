@@ -65,9 +65,12 @@ job-hunter/
 ├── pyproject.toml              # uv workspace root
 ├── .python-version             # 3.13
 ├── .pre-commit-config.yaml
+├── .tflint.hcl                 # tflint AWS ruleset config
+├── Taskfile.yml                # deploy / destroy tasks
 ├── .github/
 │   └── workflows/ci.yml
 ├── src/
+│   ├── conftest.py             # pytest AWS credential setup
 │   ├── orchestrator/
 │   │   ├── pyproject.toml
 │   │   ├── orchestrator/
@@ -87,14 +90,12 @@ job-hunter/
 │       └── tests/
 │           └── test_handler.py
 └── terraform/
-    ├── main.tf
+    ├── main.tf                 # all resources
+    ├── versions.tf
+    ├── providers.tf
+    ├── backend.tf
     ├── variables.tf
-    ├── outputs.tf
-    ├── dynamodb.tf
-    ├── eventbridge.tf
-    ├── iam.tf
-    ├── lambda.tf
-    └── sqs.tf
+    └── outputs.tf
 ```
 
 ## Local Development
@@ -123,18 +124,24 @@ uv run pre-commit install --hook-type pre-push  # for pytest
 
 ## Infrastructure
 
-```bash
-cd terraform/
+Deploys are managed via [Task](https://taskfile.dev). The Terraform backend is configured via a gitignored `backend.hcl` file.
 
-# First deploy: create a terraform.tfvars with required vars
-cat > terraform.tfvars <<EOF
-ses_from_address = "noreply@yourdomain.com"
+```bash
+# First-time setup: create backend.hcl with your S3 state bucket details
+cat > backend.hcl <<EOF
+bucket = "your-terraform-state-bucket"
+key    = "job-hunter/terraform.tfstate"
+region = "us-east-1"
+EOF
+
+# Create terraform.tfvars with required variables
+cat > terraform/terraform.tfvars <<EOF
+ses_from_address = "you@yourdomain.com"
 ses_to_address   = "you@yourdomain.com"
 EOF
 
-terraform init
-terraform plan
-terraform apply
+task deploy   # terraform init + apply
+task destroy  # terraform destroy
 ```
 
 ## Seeding Companies
@@ -143,10 +150,10 @@ Add rows to the DynamoDB `companies` table manually or via script:
 
 ```bash
 aws dynamodb put-item \
-  --table-name job-hunter-prod-companies \
+  --table-name job-hunter-companies \
   --item '{"company_name":{"S":"Acme Corp"},"careers_url":{"S":"https://acme.com/jobs"}}'
 ```
 
 ## CI
 
-Pull requests run three jobs: **Lint & Type Check**, **Tests**, and **Terraform Validate**. All must pass before merge.
+Pull requests run two jobs: **pre-commit** (ruff, ty, terraform fmt/validate/docs/tflint/trivy) and **Tests** (pytest). All must pass before merge.

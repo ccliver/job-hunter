@@ -24,3 +24,6 @@ terraform/.terraform.lock.hcl
 
 # macOS
 .DS_Store
+
+# Local backend config (contains account-specific bucket names)
+backend.hcl

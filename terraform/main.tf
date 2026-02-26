@@ -180,15 +180,14 @@ resource "aws_cloudwatch_log_group" "orchestrator" {
 }
 
 resource "aws_lambda_function" "worker" {
-  function_name                  = "${local.prefix}-worker"
-  role                           = aws_iam_role.worker.arn
-  handler                        = "worker.handler.handler"
-  runtime                        = "python3.13"
-  filename                       = data.archive_file.worker.output_path
-  source_code_hash               = data.archive_file.worker.output_base64sha256
-  timeout                        = var.lambda_timeout_seconds
-  memory_size                    = var.lambda_memory_mb
-  reserved_concurrent_executions = var.worker_concurrency
+  function_name    = "${local.prefix}-worker"
+  role             = aws_iam_role.worker.arn
+  handler          = "worker.handler.handler"
+  runtime          = "python3.13"
+  filename         = data.archive_file.worker.output_path
+  source_code_hash = data.archive_file.worker.output_base64sha256
+  timeout          = var.lambda_timeout_seconds
+  memory_size      = var.lambda_memory_mb
 
   environment {
     variables = {

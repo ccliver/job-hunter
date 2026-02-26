@@ -49,9 +49,3 @@ variable "lambda_memory_mb" {
   type        = number
   default     = 512
 }
-
-variable "worker_concurrency" {
-  description = "Max concurrent Worker Lambda executions (SQS batch size effectively controls this)"
-  type        = number
-  default     = 10
-}
