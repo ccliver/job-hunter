@@ -11,8 +11,20 @@ tasks:
     cmds:
       - task -l
 
-  deploy:
-    desc: Deploy job hunter infrastructure
+  build:
+    desc: Build Lambda deployment ZIPs with dependencies via uv
+    silent: true
+    cmds:
+      - for: [orchestrator, worker, notifier]
+        cmd: |
+          rm -rf terraform/.build/{{.ITEM}}
+          uv pip install --quiet --target terraform/.build/{{.ITEM}} ./src/{{.ITEM}}
+          cd terraform/.build/{{.ITEM}} && zip -qr ../{{.ITEM}}.zip .
+          echo "Built {{.ITEM}}.zip"
+
+  apply:
+    desc: Build Lambda ZIPs and deploy infrastructure
+    deps: [build]
     dir: terraform
     silent: true
     cmds:

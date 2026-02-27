@@ -129,40 +129,13 @@ resource "aws_iam_role_policy" "notifier" {
 }
 
 
-# Lambda deployment packages are built by packaging each src/* package.
-# The CI/CD pipeline should build these ZIPs and place them at these paths,
-# or use a tool like `uv build --wheel` + layer approach.
-# TODO: replace local_file data sources with your chosen packaging strategy
-# (e.g. Terraform null_resource + pip install, or S3 object references).
-
-data "archive_file" "orchestrator" {
-  type        = "zip"
-  source_dir  = "${path.module}/../src/orchestrator"
-  output_path = "${path.module}/.build/orchestrator.zip"
-  excludes    = ["__pycache__", "*.pyc", "tests"]
-}
-
-data "archive_file" "worker" {
-  type        = "zip"
-  source_dir  = "${path.module}/../src/worker"
-  output_path = "${path.module}/.build/worker.zip"
-  excludes    = ["__pycache__", "*.pyc", "tests"]
-}
-
-data "archive_file" "notifier" {
-  type        = "zip"
-  source_dir  = "${path.module}/../src/notifier"
-  output_path = "${path.module}/.build/notifier.zip"
-  excludes    = ["__pycache__", "*.pyc", "tests"]
-}
-
 resource "aws_lambda_function" "orchestrator" {
   function_name    = "${local.prefix}-orchestrator"
   role             = aws_iam_role.orchestrator.arn
   handler          = "orchestrator.handler.handler"
   runtime          = "python3.13"
-  filename         = data.archive_file.orchestrator.output_path
-  source_code_hash = data.archive_file.orchestrator.output_base64sha256
+  filename         = "${path.module}/.build/orchestrator.zip"
+  source_code_hash = filebase64sha256("${path.module}/.build/orchestrator.zip")
   timeout          = var.lambda_timeout_seconds
   memory_size      = var.lambda_memory_mb
 
@@ -184,8 +157,8 @@ resource "aws_lambda_function" "worker" {
   role             = aws_iam_role.worker.arn
   handler          = "worker.handler.handler"
   runtime          = "python3.13"
-  filename         = data.archive_file.worker.output_path
-  source_code_hash = data.archive_file.worker.output_base64sha256
+  filename         = "${path.module}/.build/worker.zip"
+  source_code_hash = filebase64sha256("${path.module}/.build/worker.zip")
   timeout          = var.lambda_timeout_seconds
   memory_size      = var.lambda_memory_mb
 
@@ -214,8 +187,8 @@ resource "aws_lambda_function" "notifier" {
   role             = aws_iam_role.notifier.arn
   handler          = "notifier.handler.handler"
   runtime          = "python3.13"
-  filename         = data.archive_file.notifier.output_path
-  source_code_hash = data.archive_file.notifier.output_base64sha256
+  filename         = "${path.module}/.build/notifier.zip"
+  source_code_hash = filebase64sha256("${path.module}/.build/notifier.zip")
   timeout          = var.lambda_timeout_seconds
   memory_size      = var.lambda_memory_mb
 
@@ -273,9 +246,10 @@ resource "aws_sqs_queue_policy" "worker" {
 
 
 resource "aws_dynamodb_table" "companies" {
-  name         = "${local.prefix}-companies"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "company_name"
+  name                        = "${local.prefix}-companies"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "company_name"
+  deletion_protection_enabled = true
 
   attribute {
     name = "company_name"

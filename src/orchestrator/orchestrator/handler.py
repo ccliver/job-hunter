@@ -12,19 +12,19 @@ Environment variables expected:
 from __future__ import annotations
 
 import json
-import logging
 import os
 from typing import Any
 
 import boto3
+from aws_lambda_powertools import Logger
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = Logger(service="orchestrator")
 
 dynamodb = boto3.resource("dynamodb")
 sqs = boto3.client("sqs")
 
 
+@logger.inject_lambda_context
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Entry point for the Orchestrator Lambda.
 
@@ -57,7 +57,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             MessageBody=json.dumps(message),
         )
         published += 1
-        logger.info("Queued company: %s", company["company_name"])
+        logger.info("Queued company", company=company["company_name"])
 
-    logger.info("Orchestrator published %d messages", published)
+    logger.info("Orchestrator published messages", count=published)
     return {"published": published}

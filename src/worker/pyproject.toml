@@ -5,6 +5,7 @@ description = "Worker Lambda - scrapes careers pages via Strands agent and write
 requires-python = ">=3.13"
 dependencies = [
     "boto3>=1.37",
+    "aws-lambda-powertools>=3.0",
     "strands-agents>=0.1",
     "beautifulsoup4>=4.12",
     "requests>=2.32",

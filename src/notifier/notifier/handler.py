@@ -14,16 +14,15 @@ Environment variables expected:
 
 from __future__ import annotations
 
-import logging
 import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
+from aws_lambda_powertools import Logger
 from boto3.dynamodb.conditions import Attr
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = Logger(service="notifier")
 
 dynamodb = boto3.resource("dynamodb")
 
@@ -65,6 +64,7 @@ def _build_email_body(jobs: list[dict[str, str]]) -> tuple[str, str]:
     return text_body, html_body
 
 
+@logger.inject_lambda_context
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Entry point for the Notifier Lambda.
 
@@ -87,7 +87,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     jobs = _query_recent_jobs(table, lookback_minutes)
 
     if not jobs:
-        logger.info("No new jobs found in the last %d minutes", lookback_minutes)
+        logger.info("No new jobs found", lookback_minutes=lookback_minutes)
         return {"jobs_emailed": 0}
 
     ses = boto3.client("ses", region_name=ses_region)
@@ -105,5 +105,5 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         },
     )
 
-    logger.info("Sent digest with %d jobs to %s", len(jobs), to_address)
+    logger.info("Sent digest", job_count=len(jobs), recipient=to_address)
     return {"jobs_emailed": len(jobs)}

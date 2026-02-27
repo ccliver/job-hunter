@@ -62,9 +62,9 @@ def test_build_email_body_contains_job_info() -> None:
     assert "https://acme.com/1" in html
 
 
-def test_handler_no_jobs_skips_email(aws_resources: dict) -> None:
+def test_handler_no_jobs_skips_email(aws_resources: dict, lambda_context) -> None:
     """handler() should not send an email when no recent jobs are found."""
-    result = handler({}, None)
+    result = handler({}, lambda_context)
 
     assert result["jobs_emailed"] == 0
     send_stats = aws_resources["ses"].get_send_statistics()
@@ -72,31 +72,31 @@ def test_handler_no_jobs_skips_email(aws_resources: dict) -> None:
     assert delivery_attempts == 0
 
 
-def test_handler_sends_email_when_jobs_found(aws_resources: dict) -> None:
+def test_handler_sends_email_when_jobs_found(aws_resources: dict, lambda_context) -> None:
     """handler() should send one SES email when recent jobs exist."""
     aws_resources["table"].put_item(Item=_recent_job("job-1", "SWE"))
 
-    result = handler({}, None)
+    result = handler({}, lambda_context)
 
     assert result["jobs_emailed"] == 1
     send_stats = aws_resources["ses"].get_send_statistics()
     assert send_stats["SendDataPoints"] != []
 
 
-def test_handler_ignores_old_jobs(aws_resources: dict) -> None:
+def test_handler_ignores_old_jobs(aws_resources: dict, lambda_context) -> None:
     """handler() should not email jobs outside the lookback window."""
     aws_resources["table"].put_item(Item=_recent_job("job-old", "SWE", minutes_ago=90))
 
-    result = handler({}, None)
+    result = handler({}, lambda_context)
 
     assert result["jobs_emailed"] == 0
 
 
-def test_handler_emails_all_recent_jobs(aws_resources: dict) -> None:
+def test_handler_emails_all_recent_jobs(aws_resources: dict, lambda_context) -> None:
     """handler() should include all jobs within the lookback window in one email."""
     aws_resources["table"].put_item(Item=_recent_job("job-1", "SWE"))
     aws_resources["table"].put_item(Item=_recent_job("job-2", "SRE"))
 
-    result = handler({}, None)
+    result = handler({}, lambda_context)
 
     assert result["jobs_emailed"] == 2

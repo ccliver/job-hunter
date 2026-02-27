@@ -35,7 +35,7 @@ variable "lookback_minutes" {
 variable "bedrock_model_id" {
   description = "Bedrock model ID used by the Worker agent"
   type        = string
-  default     = "anthropic.claude-haiku-4-5-20251001-v1:0"
+  default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
 variable "lambda_timeout_seconds" {

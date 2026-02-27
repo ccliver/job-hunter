@@ -5,6 +5,7 @@ description = "Notifier Lambda - queries recent jobs from DynamoDB and sends SES
 requires-python = ">=3.13"
 dependencies = [
     "boto3>=1.37",
+    "aws-lambda-powertools>=3.0",
 ]
 
 [build-system]
