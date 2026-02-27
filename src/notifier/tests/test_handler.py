@@ -52,7 +52,14 @@ def _recent_job(job_id: str, title: str, minutes_ago: int = 5) -> dict:
 
 def test_build_email_body_contains_job_info() -> None:
     """Email body should include job title, company, and URL."""
-    jobs = [{"title": "SWE", "company": "Acme", "url": "https://acme.com/1", "location": "Remote"}]
+    jobs = [
+        {
+            "title": "SWE",
+            "company": "Acme",
+            "url": "https://acme.com/1",
+            "location": "Remote",
+        }
+    ]
     text, html = _build_email_body(jobs)
 
     assert "SWE" in text

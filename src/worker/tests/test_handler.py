@@ -47,11 +47,7 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
 
 
 def _sqs_event(company_name: str, careers_url: str) -> dict:
-    return {
-        "Records": [
-            {"body": json.dumps({"company_name": company_name, "careers_url": careers_url})}
-        ]
-    }
+    return {"Records": [{"body": json.dumps({"company_name": company_name, "careers_url": careers_url})}]}
 
 
 @patch("worker.handler._scrape_jobs", return_value=[])
@@ -68,7 +64,11 @@ def test_handler_no_jobs_found(mock_scrape, aws_resources: dict, lambda_context)
 def test_handler_writes_new_jobs(mock_scrape, aws_resources: dict, lambda_context) -> None:
     """handler() should write each scraped job that passes the title filter."""
     mock_scrape.return_value = [
-        {"title": "Platform Engineer", "url": "https://acme.com/jobs/1", "location": "Remote"},
+        {
+            "title": "Platform Engineer",
+            "url": "https://acme.com/jobs/1",
+            "location": "Remote",
+        },
     ]
 
     result = handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
@@ -86,7 +86,11 @@ def test_handler_writes_new_jobs(mock_scrape, aws_resources: dict, lambda_contex
 def test_handler_deduplicates_jobs(mock_scrape, aws_resources: dict, lambda_context) -> None:
     """Calling handler twice with the same job should only write it once."""
     mock_scrape.return_value = [
-        {"title": "Platform Engineer", "url": "https://acme.com/jobs/1", "location": "Remote"},
+        {
+            "title": "Platform Engineer",
+            "url": "https://acme.com/jobs/1",
+            "location": "Remote",
+        },
     ]
     event = _sqs_event("Acme Corp", "https://acme.com/jobs")
 
@@ -102,8 +106,16 @@ def test_handler_deduplicates_jobs(mock_scrape, aws_resources: dict, lambda_cont
 def test_handler_drops_irrelevant_jobs(mock_scrape, aws_resources: dict, lambda_context) -> None:
     """handler() should not write jobs whose title doesn't match target keywords."""
     mock_scrape.return_value = [
-        {"title": "Software Engineer", "url": "https://acme.com/jobs/1", "location": "Remote"},
-        {"title": "Product Manager", "url": "https://acme.com/jobs/2", "location": "Remote"},
+        {
+            "title": "Software Engineer",
+            "url": "https://acme.com/jobs/1",
+            "location": "Remote",
+        },
+        {
+            "title": "Product Manager",
+            "url": "https://acme.com/jobs/2",
+            "location": "Remote",
+        },
     ]
 
     result = handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
@@ -114,38 +126,45 @@ def test_handler_drops_irrelevant_jobs(mock_scrape, aws_resources: dict, lambda_
 
 # --- _filter_relevant_jobs unit tests ---
 
+
 def _job(title: str) -> dict:
     return {"title": title, "url": f"https://example.com/{title}", "location": "Remote"}
 
 
-@pytest.mark.parametrize("title", [
-    "Platform Engineer",
-    "Senior Platform Engineer",
-    "Staff Engineer, Infrastructure",
-    "Site Reliability Engineer",
-    "SRE - Production",
-    "Sr. SRE",
-    "DevOps Engineer",
-    "Lead DevOps Engineer",
-    "Cloud Engineer",
-    "Senior Cloud Engineer",
-    "Infrastructure Engineer",
-    "Staff Engineer",
-])
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Platform Engineer",
+        "Senior Platform Engineer",
+        "Staff Engineer, Infrastructure",
+        "Site Reliability Engineer",
+        "SRE - Production",
+        "Sr. SRE",
+        "DevOps Engineer",
+        "Lead DevOps Engineer",
+        "Cloud Engineer",
+        "Senior Cloud Engineer",
+        "Infrastructure Engineer",
+        "Staff Engineer",
+    ],
+)
 def test_filter_passes_relevant_titles(title: str) -> None:
     """_filter_relevant_jobs should keep titles matching a target keyword."""
     result = _filter_relevant_jobs([_job(title)], "Acme")
     assert len(result) == 1
 
 
-@pytest.mark.parametrize("title", [
-    "Software Engineer",
-    "Product Manager",
-    "Data Scientist",
-    "Frontend Developer",
-    "Sales Engineer",
-    "Recruiting Coordinator",
-])
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Software Engineer",
+        "Product Manager",
+        "Data Scientist",
+        "Frontend Developer",
+        "Sales Engineer",
+        "Recruiting Coordinator",
+    ],
+)
 def test_filter_drops_irrelevant_titles(title: str) -> None:
     """_filter_relevant_jobs should drop titles that don't match any keyword."""
     result = _filter_relevant_jobs([_job(title)], "Acme")

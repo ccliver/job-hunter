@@ -78,10 +78,7 @@ def _filter_relevant_jobs(jobs: list[dict[str, str]], company: str) -> list[dict
     Returns:
         Subset of jobs whose title matched at least one keyword.
     """
-    matched = [
-        j for j in jobs
-        if any(kw in j.get("title", "").lower() for kw in _TITLE_KEYWORDS)
-    ]
+    matched = [j for j in jobs if any(kw in j.get("title", "").lower() for kw in _TITLE_KEYWORDS)]
     logger.info(
         "Job filter complete",
         company=company,
@@ -128,7 +125,7 @@ def _scrape_jobs(company_name: str, careers_url: str) -> list[dict[str, str]]:
 
     target_roles = ", ".join(_TARGET_ROLES)
     prompt = (
-        f"You are extracting job listings from the careers page of {company_name} ({careers_url}).\n"
+        f"You are extracting job listings from the careers page of {company_name} ({careers_url}).\n"  # noqa: E501
         f"Only extract roles that match these types: {target_roles}.\n"
         "Skip all other roles entirely — do not include them in the output.\n\n"
         "Return a JSON array where each element has exactly these keys:\n"
@@ -151,13 +148,13 @@ def _scrape_jobs(company_name: str, careers_url: str) -> list[dict[str, str]]:
             logger.warning("No JSON array found in agent response", company=company_name)
             return []
         jobs: list[Any] = json.loads(match.group())
-        return [
-            j
-            for j in jobs
-            if isinstance(j, dict) and j.get("title") and j.get("url")
-        ]
+        return [j for j in jobs if isinstance(j, dict) and j.get("title") and j.get("url")]
     except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse agent response as JSON", error=str(exc), company=company_name)
+        logger.warning(
+            "Failed to parse agent response as JSON",
+            error=str(exc),
+            company=company_name,
+        )
         return []
 
 

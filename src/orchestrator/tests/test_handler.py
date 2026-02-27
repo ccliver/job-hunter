@@ -35,12 +35,8 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
 
 def test_handler_publishes_one_message_per_company(aws_resources: dict, lambda_context) -> None:
     """handler() should send one SQS message for each company in the table."""
-    aws_resources["table"].put_item(
-        Item={"company_name": "Acme Corp", "careers_url": "https://acme.com/jobs"}
-    )
-    aws_resources["table"].put_item(
-        Item={"company_name": "Globex", "careers_url": "https://globex.com/careers"}
-    )
+    aws_resources["table"].put_item(Item={"company_name": "Acme Corp", "careers_url": "https://acme.com/jobs"})
+    aws_resources["table"].put_item(Item={"company_name": "Globex", "careers_url": "https://globex.com/careers"})
 
     result = handler({}, lambda_context)
 
@@ -68,9 +64,7 @@ def test_handler_empty_table(aws_resources: dict, lambda_context) -> None:
 
 def test_handler_message_body_shape(aws_resources: dict, lambda_context) -> None:
     """Each SQS message body should contain company_name and careers_url."""
-    aws_resources["table"].put_item(
-        Item={"company_name": "Acme Corp", "careers_url": "https://acme.com/jobs"}
-    )
+    aws_resources["table"].put_item(Item={"company_name": "Acme Corp", "careers_url": "https://acme.com/jobs"})
 
     handler({}, lambda_context)
 

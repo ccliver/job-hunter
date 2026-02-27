@@ -18,7 +18,12 @@ tasks:
       - for: [orchestrator, worker, notifier]
         cmd: |
           rm -rf terraform/.build/{{.ITEM}}
-          uv pip install --quiet --target terraform/.build/{{.ITEM}} ./src/{{.ITEM}}
+          pip3 install --quiet \
+            --platform manylinux2014_x86_64 \
+            --python-version 3.13 \
+            --implementation cp \
+            --only-binary=:all: \
+            --target terraform/.build/{{.ITEM}} ./src/{{.ITEM}}
           cd terraform/.build/{{.ITEM}} && zip -qr ../{{.ITEM}}.zip .
           echo "Built {{.ITEM}}.zip"
 
