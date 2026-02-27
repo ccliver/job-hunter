@@ -25,3 +25,18 @@ tasks:
     silent: true
     cmds:
       - terraform destroy -auto-approve
+
+  seed:
+    desc: Seed the DynamoDB companies table from companies/companies.json
+    silent: true
+    cmds:
+      - |
+        uv run python -c "
+        import json, boto3
+        data = json.load(open('companies/companies.json'))
+        table = boto3.resource('dynamodb').Table('job-hunter-companies')
+        for item in data:
+            table.put_item(Item=item)
+            print(f'Seeded: {item[\"company_name\"]}')
+        print(f'Done. {len(data)} companies seeded.')
+        "
