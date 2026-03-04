@@ -35,7 +35,7 @@ variable "lookback_minutes" {
 variable "bedrock_model_id" {
   description = "Bedrock model ID used by the Worker agent"
   type        = string
-  default     = "anthropic.claude-haiku-4-5-20251001-v1:0"
+  default     = "anthropic.claude-3-haiku-20240307-v1:0"
 }
 
 variable "lambda_timeout_seconds" {
@@ -45,7 +45,13 @@ variable "lambda_timeout_seconds" {
 }
 
 variable "lambda_memory_mb" {
-  description = "Lambda function memory in MB"
+  description = "Lambda function memory in MB (orchestrator and notifier)"
   type        = number
   default     = 512
+}
+
+variable "worker_memory_mb" {
+  description = "Worker Lambda memory in MB — needs extra headroom for Chromium"
+  type        = number
+  default     = 1024
 }
