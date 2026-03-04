@@ -43,4 +43,11 @@ RUN uv pip install --system --no-cache .
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium
 
+# Drop to a non-root user. The browser binaries are chowned so Playwright
+# can read/execute them; the Lambda task root files are world-readable by
+# default (standard COPY umask) so no chown is needed there.
+RUN useradd -m -u 1000 appuser \
+    && chown -R appuser /ms-playwright
+USER appuser
+
 CMD ["worker.handler.handler"]

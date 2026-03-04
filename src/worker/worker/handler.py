@@ -195,7 +195,7 @@ def _fetch_default_jobs(company_name: str, careers_url: str) -> list[dict[str, s
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
-                    "--no-zygote",       # prevents forking a zygote process (required in Lambda)
+                    "--no-zygote",  # prevents forking a zygote process (required in Lambda)
                     "--single-process",  # runs renderer in the browser process (required in Lambda)
                 ],
             )
@@ -224,7 +224,7 @@ def _fetch_default_jobs(company_name: str, careers_url: str) -> list[dict[str, s
         "1. Only return URLs that appear verbatim in the page content. Never construct, infer, or modify URLs.\n"
         "2. If you cannot find a complete, valid URL for a job listing, omit that job entirely.\n"
         "3. Return only jobs relevant to platform engineering, SRE, DevOps, cloud, or infrastructure roles.\n"
-        '4. Return results as a JSON array with fields: title, url, location.\n'
+        "4. Return results as a JSON array with fields: title, url, location.\n"
         "5. If no relevant jobs are found, return an empty array.\n\n"
         f"Page content:\n{page_text}"
     )

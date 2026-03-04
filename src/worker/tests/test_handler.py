@@ -47,11 +47,7 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
 
 
 def _sqs_event(company_name: str, careers_url: str, ats: str = "unknown") -> dict:
-    return {
-        "Records": [
-            {"body": json.dumps({"company_name": company_name, "careers_url": careers_url, "ats": ats})}
-        ]
-    }
+    return {"Records": [{"body": json.dumps({"company_name": company_name, "careers_url": careers_url, "ats": ats})}]}
 
 
 # --- handler integration tests (ATS dispatch mocked at _fetch_jobs) ---

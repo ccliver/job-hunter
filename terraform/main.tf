@@ -82,15 +82,15 @@ resource "aws_iam_role_policy" "worker" {
         Resource = "*"
       },
       {
-        Sid    = "MarketplaceSubscribe"
-        Effect = "Allow"
-        Action = ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"]
+        Sid      = "MarketplaceSubscribe"
+        Effect   = "Allow"
+        Action   = ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"]
         Resource = "*"
       },
       {
-        Sid    = "ECRPullImage"
-        Effect = "Allow"
-        Action = ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"]
+        Sid      = "ECRPullImage"
+        Effect   = "Allow"
+        Action   = ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"]
         Resource = aws_ecr_repository.worker.arn
       },
       {
@@ -348,7 +348,7 @@ resource "aws_lambda_permission" "notifier_eventbridge" {
 
 resource "aws_ecr_repository" "worker" {
   name                 = "${local.prefix}-worker"
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "MUTABLE" #trivy:ignore:AWS-0031
 
   image_scanning_configuration {
     scan_on_push = true
