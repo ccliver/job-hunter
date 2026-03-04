@@ -4,6 +4,7 @@ version: '3'
 
 env:
   AWS_PROFILE: lab
+  AWS_REGION: us-east-1
 
 tasks:
   default:
@@ -12,10 +13,10 @@ tasks:
       - task -l
 
   build:
-    desc: Build Lambda deployment ZIPs with dependencies via uv
+    desc: Build orchestrator and notifier Lambda ZIPs with dependencies
     silent: true
     cmds:
-      - for: [orchestrator, worker, notifier]
+      - for: [orchestrator, notifier]
         cmd: |
           rm -rf terraform/.build/{{.ITEM}}
           pip3 install --quiet \
@@ -27,14 +28,74 @@ tasks:
           cd terraform/.build/{{.ITEM}} && zip -qr ../{{.ITEM}}.zip .
           echo "Built {{.ITEM}}.zip"
 
+  ecr-login:
+    desc: Authenticate Docker to ECR
+    silent: true
+    cmds:
+      - |
+        ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+        aws ecr get-login-password --region {{.AWS_REGION}} | \
+          docker login --username AWS --password-stdin \
+          ${ACCOUNT}.dkr.ecr.{{.AWS_REGION}}.amazonaws.com
+        echo "ECR login successful"
+
+  build-worker:
+    desc: Build and push the worker container image to ECR
+    deps: [ecr-login]
+    silent: true
+    cmds:
+      - |
+        ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+        IMAGE=${ACCOUNT}.dkr.ecr.{{.AWS_REGION}}.amazonaws.com/job-hunter-worker:latest
+        docker build --platform linux/amd64 -t ${IMAGE} src/worker/
+        docker push ${IMAGE}
+        # Force Lambda to pull the new :latest image if the function already exists
+        aws lambda update-function-code \
+          --function-name job-hunter-worker \
+          --image-uri ${IMAGE} \
+          --output text --query 'FunctionName' 2>/dev/null \
+          && echo "Lambda image updated" || echo "Lambda not yet deployed; image will be used on first apply"
+
   apply:
-    desc: Build Lambda ZIPs and deploy infrastructure
+    desc: Build all artifacts and deploy infrastructure
     deps: [build]
     dir: terraform
     silent: true
     cmds:
       - terraform init -backend-config=backend.hcl
+      # Create the ECR repository before attempting to push the image
+      - terraform apply -auto-approve -target=aws_ecr_repository.worker
+      - task: build-worker
       - terraform apply -auto-approve
+
+  dynamo-disable-protection:
+    desc: Disable deletion protection on the DynamoDB companies table
+    silent: true
+    cmds:
+      - |
+        aws dynamodb update-table \
+          --table-name job-hunter-companies \
+          --no-deletion-protection-enabled \
+          --output text --query 'TableDescription.TableName'
+        echo "Deletion protection disabled on job-hunter-companies"
+
+  ecr-delete-images:
+    desc: Delete all images from the job-hunter-worker ECR repository
+    silent: true
+    cmds:
+      - |
+        IMAGES=$(aws ecr list-images \
+          --repository-name job-hunter-worker \
+          --query 'imageIds[*]' --output json)
+        if [ "$IMAGES" = "[]" ] || [ -z "$IMAGES" ]; then
+          echo "No images found in job-hunter-worker"
+          exit 0
+        fi
+        aws ecr batch-delete-image \
+          --repository-name job-hunter-worker \
+          --image-ids "$IMAGES" \
+          --output text --query 'imageIds[*].imageTag'
+        echo "All images deleted from job-hunter-worker"
 
   destroy:
     desc: Destroy job hunter infrastructure
@@ -42,6 +103,112 @@ tasks:
     silent: true
     cmds:
       - terraform destroy -auto-approve
+
+  invoke:
+    desc: "Full end-to-end test: orchestrator -> workers (via SQS) -> notifier"
+    silent: true
+    cmds:
+      - |
+        echo ">>> Invoking orchestrator"
+        aws lambda invoke \
+          --function-name job-hunter-orchestrator \
+          --payload '{}' \
+          --cli-binary-format raw-in-base64-out \
+          /tmp/jh-orchestrator.json
+        cat /tmp/jh-orchestrator.json && echo
+
+      - |
+        echo ">>> Waiting for worker queue to drain"
+        QUEUE_URL=$(aws sqs get-queue-url --queue-name job-hunter-worker \
+          --query QueueUrl --output text)
+        WAITED=0
+        while true; do
+          VISIBLE=$(aws sqs get-queue-attributes \
+            --queue-url "$QUEUE_URL" \
+            --attribute-names ApproximateNumberOfMessages \
+            --query 'Attributes.ApproximateNumberOfMessages' --output text)
+          IN_FLIGHT=$(aws sqs get-queue-attributes \
+            --queue-url "$QUEUE_URL" \
+            --attribute-names ApproximateNumberOfMessagesNotVisible \
+            --query 'Attributes.ApproximateNumberOfMessagesNotVisible' --output text)
+          TOTAL=$((VISIBLE + IN_FLIGHT))
+          echo "    Queue depth: $TOTAL (visible=$VISIBLE, in-flight=$IN_FLIGHT)"
+          [ "$TOTAL" -eq 0 ] && break
+          if [ "$WAITED" -ge 600 ]; then
+            echo "    Timed out waiting for queue to drain after 10 minutes" && exit 1
+          fi
+          sleep 5
+          WAITED=$((WAITED + 5))
+        done
+        echo "    Queue drained."
+
+      - |
+        echo ">>> Invoking notifier"
+        aws lambda invoke \
+          --function-name job-hunter-notifier \
+          --payload '{}' \
+          --cli-binary-format raw-in-base64-out \
+          /tmp/jh-notifier.json
+        cat /tmp/jh-notifier.json && echo
+
+  logs-worker:
+    desc: "Print the worker Lambda's most recent CloudWatch log streams (default: last 5)"
+    silent: true
+    vars:
+      N: '{{.N | default "5"}}'
+    cmds:
+      - |
+        uv run python -c "
+        import boto3, sys, json
+        logs = boto3.client('logs')
+        streams = logs.describe_log_streams(
+            logGroupName='/aws/lambda/job-hunter-worker',
+            orderBy='LastEventTime',
+            descending=True,
+            limit={{.N}},
+        )['logStreams']
+        if not streams:
+            print('No log streams found.')
+            sys.exit(0)
+        SKIP = {
+            'level', 'location', 'timestamp', 'service', 'cold_start',
+            'function_name', 'function_memory_size', 'function_arn',
+            'function_request_id', 'xray_trace_id',
+        }
+        for stream in reversed(streams):
+            name = stream['logStreamName']
+            print(f'\n>>> {name}')
+            events = logs.get_log_events(
+                logGroupName='/aws/lambda/job-hunter-worker',
+                logStreamName=name,
+                startFromHead=True,
+            )['events']
+            for e in events:
+                raw = e['message'].strip()
+                try:
+                    data = json.loads(raw)
+                    msg = data.get('message', raw)
+                    extras = {k: v for k, v in data.items() if k not in SKIP and k != 'message'}
+                    print(f\"{msg} | {extras}\" if extras else msg)
+                except (json.JSONDecodeError, KeyError):
+                    print(raw)
+        "
+
+  flush-jobs:
+    desc: Delete all items from the DynamoDB jobs table
+    silent: true
+    cmds:
+      - |
+        uv run python -c "
+        import boto3
+        table = boto3.resource('dynamodb').Table('job-hunter-jobs')
+        scan = table.scan(ProjectionExpression='job_id')
+        items = scan['Items']
+        with table.batch_writer() as batch:
+            for item in items:
+                batch.delete_item(Key={'job_id': item['job_id']})
+        print(f'Deleted {len(items)} jobs.')
+        "
 
   seed:
     desc: Seed the DynamoDB companies table from companies/companies.json
@@ -54,6 +221,7 @@ tasks:
         table = boto3.resource('dynamodb').Table('job-hunter-companies')
         for item in data:
             table.put_item(Item=item)
-            print(f'Seeded: {item[\"company_name\"]}')
+            ats = item.get('ats', 'unknown')
+            print(f'Seeded: {item[\"company_name\"]} (ats={ats})')
         print(f'Done. {len(data)} companies seeded.')
         "

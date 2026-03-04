@@ -82,6 +82,24 @@ resource "aws_iam_role_policy" "worker" {
         Resource = "*"
       },
       {
+        Sid    = "MarketplaceSubscribe"
+        Effect = "Allow"
+        Action = ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"]
+        Resource = "*"
+      },
+      {
+        Sid    = "ECRPullImage"
+        Effect = "Allow"
+        Action = ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"]
+        Resource = aws_ecr_repository.worker.arn
+      },
+      {
+        Sid      = "ECRGetAuthToken"
+        Effect   = "Allow"
+        Action   = ["ecr:GetAuthorizationToken"]
+        Resource = "*"
+      },
+      {
         Sid      = "CloudWatchLogs"
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
@@ -153,14 +171,12 @@ resource "aws_cloudwatch_log_group" "orchestrator" {
 }
 
 resource "aws_lambda_function" "worker" {
-  function_name    = "${local.prefix}-worker"
-  role             = aws_iam_role.worker.arn
-  handler          = "worker.handler.handler"
-  runtime          = "python3.13"
-  filename         = "${path.module}/.build/worker.zip"
-  source_code_hash = filebase64sha256("${path.module}/.build/worker.zip")
-  timeout          = var.lambda_timeout_seconds
-  memory_size      = var.lambda_memory_mb
+  function_name = "${local.prefix}-worker"
+  role          = aws_iam_role.worker.arn
+  package_type  = "Image"
+  image_uri     = "${aws_ecr_repository.worker.repository_url}:latest"
+  timeout       = var.lambda_timeout_seconds
+  memory_size   = var.worker_memory_mb
 
   environment {
     variables = {
@@ -327,4 +343,18 @@ resource "aws_lambda_permission" "notifier_eventbridge" {
   function_name = aws_lambda_function.notifier.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.notifier.arn
+}
+
+
+resource "aws_ecr_repository" "worker" {
+  name                 = "${local.prefix}-worker"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = {
+    Name = "${local.prefix}-worker"
+  }
 }

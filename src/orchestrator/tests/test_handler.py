@@ -33,6 +33,13 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
         yield {"table": table, "sqs": sqs, "queue_url": queue_url}
 
 
+def _messages(aws_resources: dict) -> list[dict]:
+    raw = aws_resources["sqs"].receive_message(
+        QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10
+    )
+    return [json.loads(m["Body"]) for m in raw.get("Messages", [])]
+
+
 def test_handler_publishes_one_message_per_company(aws_resources: dict, lambda_context) -> None:
     """handler() should send one SQS message for each company in the table."""
     aws_resources["table"].put_item(Item={"company_name": "Acme Corp", "careers_url": "https://acme.com/jobs"})
@@ -41,12 +48,7 @@ def test_handler_publishes_one_message_per_company(aws_resources: dict, lambda_c
     result = handler({}, lambda_context)
 
     assert result["published"] == 2
-    messages = (
-        aws_resources["sqs"]
-        .receive_message(QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10)
-        .get("Messages", [])
-    )
-    assert len(messages) == 2
+    assert len(_messages(aws_resources)) == 2
 
 
 def test_handler_empty_table(aws_resources: dict, lambda_context) -> None:
@@ -54,25 +56,38 @@ def test_handler_empty_table(aws_resources: dict, lambda_context) -> None:
     result = handler({}, lambda_context)
 
     assert result["published"] == 0
-    messages = (
-        aws_resources["sqs"]
-        .receive_message(QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10)
-        .get("Messages", [])
-    )
-    assert len(messages) == 0
+    assert _messages(aws_resources) == []
 
 
-def test_handler_message_body_shape(aws_resources: dict, lambda_context) -> None:
-    """Each SQS message body should contain company_name and careers_url."""
+def test_handler_message_body_contains_required_fields(aws_resources: dict, lambda_context) -> None:
+    """Each SQS message body should contain company_name, careers_url, and ats."""
     aws_resources["table"].put_item(Item={"company_name": "Acme Corp", "careers_url": "https://acme.com/jobs"})
 
     handler({}, lambda_context)
 
-    messages = (
-        aws_resources["sqs"]
-        .receive_message(QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=1)
-        .get("Messages", [])
-    )
-    body = json.loads(messages[0]["Body"])
+    body = _messages(aws_resources)[0]
     assert body["company_name"] == "Acme Corp"
     assert body["careers_url"] == "https://acme.com/jobs"
+    assert body["ats"] == "unknown"
+
+
+def test_handler_message_passes_through_ats_field(aws_resources: dict, lambda_context) -> None:
+    """handler() should include the ats value from DynamoDB in the SQS message."""
+    aws_resources["table"].put_item(
+        Item={"company_name": "Datadog", "careers_url": "https://boards.greenhouse.io/datadog", "ats": "greenhouse"}
+    )
+
+    handler({}, lambda_context)
+
+    body = _messages(aws_resources)[0]
+    assert body["ats"] == "greenhouse"
+
+
+def test_handler_missing_ats_defaults_to_unknown(aws_resources: dict, lambda_context) -> None:
+    """handler() should default ats to 'unknown' when the field is absent."""
+    aws_resources["table"].put_item(Item={"company_name": "Acme Corp", "careers_url": "https://acme.com/jobs"})
+
+    handler({}, lambda_context)
+
+    body = _messages(aws_resources)[0]
+    assert body["ats"] == "unknown"

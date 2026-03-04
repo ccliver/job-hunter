@@ -9,6 +9,7 @@ dependencies = [
     "strands-agents>=0.1",
     "beautifulsoup4>=4.12",
     "requests>=2.32",
+    "playwright>=1.40",
 ]
 
 [build-system]

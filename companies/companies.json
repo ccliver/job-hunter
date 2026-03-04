@@ -1,4 +1,10 @@
 [
-  {"company_name": "Datadog", "careers_url": "https://careers.datadoghq.com"},
-  {"company_name": "Palo Alto Networks", "careers_url": "https://jobs.paloaltonetworks.com"}
+  {"company_name": "Datadog", "careers_url": "https://boards-api.greenhouse.io/v1/boards/datadog/jobs", "ats": "greenhouse"},
+  {"company_name": "CVS", "careers_url": "https://jobs.cvshealth.com/us/en", "ats": "unknown"},
+  {"company_name": "JP Morgan Chase", "careers_url": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs", "ats": "unknown"},
+  {"company_name": "Home Depot", "careers_url": "https://careers.homedepot.com", "ats": "unknown"},
+  {"company_name": "Walmart", "careers_url": "https://careers.walmart.com", "ats": "unknown"},
+  {"company_name": "Verizon", "careers_url": "https://www.verizon.com/about/careers", "ats": "unknown"},
+  {"company_name": "UnitedHealth Group", "careers_url": "https://careers.unitedhealthgroup.com", "ats": "unknown"},
+  {"company_name": "Target", "careers_url": "https://corporate.target.com/careers", "ats": "workday"}
 ]

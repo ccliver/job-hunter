@@ -9,7 +9,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from worker.handler import _filter_relevant_jobs, _make_job_id, handler
+from worker.handler import _fetch_jobs, _filter_relevant_jobs, _make_job_id, handler
 
 REGION = "us-east-1"
 
@@ -46,13 +46,20 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
         yield {"table": table}
 
 
-def _sqs_event(company_name: str, careers_url: str) -> dict:
-    return {"Records": [{"body": json.dumps({"company_name": company_name, "careers_url": careers_url})}]}
+def _sqs_event(company_name: str, careers_url: str, ats: str = "unknown") -> dict:
+    return {
+        "Records": [
+            {"body": json.dumps({"company_name": company_name, "careers_url": careers_url, "ats": ats})}
+        ]
+    }
 
 
-@patch("worker.handler._scrape_jobs", return_value=[])
-def test_handler_no_jobs_found(mock_scrape, aws_resources: dict, lambda_context) -> None:
-    """handler() should return 0 jobs_written when the scraper finds nothing."""
+# --- handler integration tests (ATS dispatch mocked at _fetch_jobs) ---
+
+
+@patch("worker.handler._fetch_jobs", return_value=[])
+def test_handler_no_jobs_found(mock_fetch, aws_resources: dict, lambda_context) -> None:
+    """handler() should return 0 jobs_written when the fetcher finds nothing."""
     result = handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
 
     assert result["records_processed"] == 1
@@ -60,15 +67,11 @@ def test_handler_no_jobs_found(mock_scrape, aws_resources: dict, lambda_context)
     assert aws_resources["table"].scan()["Count"] == 0
 
 
-@patch("worker.handler._scrape_jobs")
-def test_handler_writes_new_jobs(mock_scrape, aws_resources: dict, lambda_context) -> None:
-    """handler() should write each scraped job that passes the title filter."""
-    mock_scrape.return_value = [
-        {
-            "title": "Platform Engineer",
-            "url": "https://acme.com/jobs/1",
-            "location": "Remote",
-        },
+@patch("worker.handler._fetch_jobs")
+def test_handler_writes_new_jobs(mock_fetch, aws_resources: dict, lambda_context) -> None:
+    """handler() should write each fetched job that passes the title filter."""
+    mock_fetch.return_value = [
+        {"title": "Platform Engineer", "url": "https://acme.com/jobs/1", "location": "Remote"},
     ]
 
     result = handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
@@ -82,15 +85,11 @@ def test_handler_writes_new_jobs(mock_scrape, aws_resources: dict, lambda_contex
     assert "discovered_at" in items[0]
 
 
-@patch("worker.handler._scrape_jobs")
-def test_handler_deduplicates_jobs(mock_scrape, aws_resources: dict, lambda_context) -> None:
+@patch("worker.handler._fetch_jobs")
+def test_handler_deduplicates_jobs(mock_fetch, aws_resources: dict, lambda_context) -> None:
     """Calling handler twice with the same job should only write it once."""
-    mock_scrape.return_value = [
-        {
-            "title": "Platform Engineer",
-            "url": "https://acme.com/jobs/1",
-            "location": "Remote",
-        },
+    mock_fetch.return_value = [
+        {"title": "Platform Engineer", "url": "https://acme.com/jobs/1", "location": "Remote"},
     ]
     event = _sqs_event("Acme Corp", "https://acme.com/jobs")
 
@@ -102,26 +101,74 @@ def test_handler_deduplicates_jobs(mock_scrape, aws_resources: dict, lambda_cont
     assert aws_resources["table"].scan()["Count"] == 1
 
 
-@patch("worker.handler._scrape_jobs")
-def test_handler_drops_irrelevant_jobs(mock_scrape, aws_resources: dict, lambda_context) -> None:
+@patch("worker.handler._fetch_jobs")
+def test_handler_drops_irrelevant_jobs(mock_fetch, aws_resources: dict, lambda_context) -> None:
     """handler() should not write jobs whose title doesn't match target keywords."""
-    mock_scrape.return_value = [
-        {
-            "title": "Software Engineer",
-            "url": "https://acme.com/jobs/1",
-            "location": "Remote",
-        },
-        {
-            "title": "Product Manager",
-            "url": "https://acme.com/jobs/2",
-            "location": "Remote",
-        },
+    mock_fetch.return_value = [
+        {"title": "Software Engineer", "url": "https://acme.com/jobs/1", "location": "Remote"},
+        {"title": "Product Manager", "url": "https://acme.com/jobs/2", "location": "Remote"},
     ]
 
     result = handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
 
     assert result["jobs_written"] == 0
     assert aws_resources["table"].scan()["Count"] == 0
+
+
+@patch("worker.handler._fetch_jobs")
+def test_handler_passes_ats_to_fetch(mock_fetch, aws_resources: dict, lambda_context) -> None:
+    """handler() should forward the ats field from the SQS message to _fetch_jobs."""
+    mock_fetch.return_value = []
+
+    handler(_sqs_event("Datadog", "https://boards.greenhouse.io/datadog", ats="greenhouse"), lambda_context)
+
+    mock_fetch.assert_called_once_with("Datadog", "https://boards.greenhouse.io/datadog", "greenhouse")
+
+
+@patch("worker.handler._fetch_jobs")
+def test_handler_defaults_ats_to_unknown(mock_fetch, aws_resources: dict, lambda_context) -> None:
+    """handler() should default ats to 'unknown' when not present in the SQS message."""
+    mock_fetch.return_value = []
+    event = {"Records": [{"body": json.dumps({"company_name": "Acme", "careers_url": "https://acme.com/jobs"})}]}
+
+    handler(event, lambda_context)
+
+    mock_fetch.assert_called_once_with("Acme", "https://acme.com/jobs", "unknown")
+
+
+# --- _fetch_jobs dispatch unit tests ---
+
+
+@patch("worker.handler._fetch_greenhouse_jobs")
+def test_fetch_jobs_dispatches_greenhouse(mock_gh) -> None:
+    """_fetch_jobs should call _fetch_greenhouse_jobs for ats='greenhouse'."""
+    mock_gh.return_value = []
+    _fetch_jobs("Acme", "https://boards.greenhouse.io/acme", "greenhouse")
+    mock_gh.assert_called_once_with("https://boards.greenhouse.io/acme")
+
+
+@patch("worker.handler._fetch_lever_jobs")
+def test_fetch_jobs_dispatches_lever(mock_lv) -> None:
+    """_fetch_jobs should call _fetch_lever_jobs for ats='lever'."""
+    mock_lv.return_value = []
+    _fetch_jobs("Acme", "https://jobs.lever.co/acme", "lever")
+    mock_lv.assert_called_once_with("https://jobs.lever.co/acme")
+
+
+@patch("worker.handler._fetch_default_jobs")
+def test_fetch_jobs_dispatches_unknown(mock_def) -> None:
+    """_fetch_jobs should call _fetch_default_jobs for ats='unknown'."""
+    mock_def.return_value = []
+    _fetch_jobs("Acme", "https://acme.com/jobs", "unknown")
+    mock_def.assert_called_once_with("Acme", "https://acme.com/jobs")
+
+
+@patch("worker.handler._fetch_default_jobs")
+def test_fetch_jobs_dispatches_unrecognised_ats(mock_def) -> None:
+    """_fetch_jobs should fall back to the default handler for unknown ATS values."""
+    mock_def.return_value = []
+    _fetch_jobs("Acme", "https://acme.com/jobs", "workday")
+    mock_def.assert_called_once_with("Acme", "https://acme.com/jobs")
 
 
 # --- _filter_relevant_jobs unit tests ---

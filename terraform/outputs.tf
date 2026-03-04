@@ -32,3 +32,8 @@ output "notifier_lambda_arn" {
   description = "ARN of the Notifier Lambda"
   value       = aws_lambda_function.notifier.arn
 }
+
+output "worker_ecr_repository_url" {
+  description = "ECR repository URL for the Worker container image"
+  value       = aws_ecr_repository.worker.repository_url
+}
