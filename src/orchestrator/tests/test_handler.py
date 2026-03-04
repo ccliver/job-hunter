@@ -34,9 +34,7 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
 
 
 def _messages(aws_resources: dict) -> list[dict]:
-    raw = aws_resources["sqs"].receive_message(
-        QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10
-    )
+    raw = aws_resources["sqs"].receive_message(QueueUrl=aws_resources["queue_url"], MaxNumberOfMessages=10)
     return [json.loads(m["Body"]) for m in raw.get("Messages", [])]
 
 
