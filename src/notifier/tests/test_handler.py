@@ -69,6 +69,48 @@ def test_build_email_body_contains_job_info() -> None:
     assert "https://acme.com/1" in html
 
 
+def test_build_email_body_includes_location() -> None:
+    """Email body should include each job's location."""
+    jobs = [{"title": "SWE", "company": "Acme", "url": "https://acme.com/1", "location": "Austin, TX"}]
+    text, html = _build_email_body(jobs)
+
+    assert "Austin, TX" in text
+    assert "Austin, TX" in html
+
+
+def test_build_email_body_groups_by_company() -> None:
+    """Email body should group multiple jobs from the same company together."""
+    jobs = [
+        {"title": "SWE", "company": "Acme", "url": "https://acme.com/1", "location": "Remote"},
+        {"title": "SRE", "company": "Acme", "url": "https://acme.com/2", "location": "Remote"},
+        {"title": "DevOps Engineer", "company": "Beta Corp", "url": "https://beta.com/1", "location": "Remote"},
+    ]
+    text, html = _build_email_body(jobs)
+
+    assert "Acme (2)" in text
+    assert "Beta Corp (1)" in text
+    assert "Acme &middot; 2" in html
+    assert "Beta Corp &middot; 1" in html
+
+
+def test_build_email_body_escapes_html_special_characters() -> None:
+    """Email HTML body should escape special characters in job titles."""
+    jobs = [{"title": "R&D Engineer <Platform>", "company": "Acme", "url": "https://acme.com/1", "location": ""}]
+    _, html = _build_email_body(jobs)
+
+    assert "R&amp;D Engineer &lt;Platform&gt;" in html
+    assert "<Platform>" not in html
+
+
+def test_build_email_body_omits_location_line_when_blank() -> None:
+    """Email body should not render an empty location line when location is missing."""
+    jobs = [{"title": "SWE", "company": "Acme", "url": "https://acme.com/1", "location": ""}]
+    text, html = _build_email_body(jobs)
+
+    assert "()" not in text
+    assert "color:#8a8a9e" not in html
+
+
 def test_handler_no_jobs_skips_email(aws_resources: dict, lambda_context) -> None:
     """handler() should not send an email when no recent jobs are found."""
     result = handler({}, lambda_context)

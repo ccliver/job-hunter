@@ -23,7 +23,7 @@ src/
     orchestrator/handler.py      # scans companies table, fans out SQS
     tests/test_handler.py
   worker/
-    worker/handler.py            # Strands agent scrapes careers page, writes jobs
+    worker/handler.py            # _fetch_jobs dispatches to an ATS fetcher, writes jobs
     tests/test_handler.py
   notifier/
     notifier/handler.py          # queries recent jobs, sends SES digest
@@ -57,7 +57,9 @@ task destroy                     # terraform destroy
 - **uv workspace** with three packages under `src/`. Each Lambda has its own `pyproject.toml` so dependencies are isolated per function.
 - All handlers follow the same pattern: module-level boto3 clients (`dynamodb = boto3.resource("dynamodb")`), env vars read inside the handler function.
 - Job deduplication key: `SHA-256(company|title|url)` → `job_id` DynamoDB partition key. See `worker/handler.py:_make_job_id`.
-- `_scrape_jobs()` in `worker/handler.py` is the main TODO — Strands agent not yet implemented.
+- `worker/handler.py:_fetch_jobs` dispatches on the `ats` field to one of: `greenhouse`, `lever`, `workday` (all JSON API calls, no LLM), `builtin` (scrapes a Built In search results page — server-rendered HTML, no LLM; aggregates across employers so each job carries its own `company` key and jobs from companies already tracked directly are skipped, via a `dynamodb:Scan` on `COMPANIES_TABLE`), or the `unknown` default which drives a Playwright + Strands/Bedrock (Claude Haiku) scrape.
+- `worker/handler.py:_filter_relevant_jobs` also drops jobs indicating a clearance requirement above Public Trust (`_requires_excluded_clearance`), title-only and applied uniformly across every backend. `_fetch_greenhouse_jobs` additionally checks the full job description (Greenhouse's list API returns it for free via `content=true`). `_fetch_workday_jobs` does too, via a per-posting follow-up request to the Workday job-detail endpoint (`.../wday/cxs/{tenant}/{site}{externalPath}`) — but only for postings whose title already passes `_title_looks_relevant`, to avoid one extra request per irrelevant posting; a failed detail fetch falls back to title-only checking rather than dropping the job. Built In and the LLM path rely on title/page text only, except the LLM prompt is also instructed to exclude clearance-gated postings it sees in the full page text.
+- `worker/handler.py:_filter_relevant_jobs` also drops jobs whose `location` matches `_is_non_us_location` — a word-boundary regex over a curated list of countries/regions/offshore-hub cities (`_NON_US_LOCATION_KEYWORDS`). Defaults to keeping ambiguous locations (bare "Remote", "N Locations", empty) rather than risk hiding a real US posting; deliberately omits US/non-US-ambiguous names (e.g. "Georgia") for the same reason.
 - Lambda handlers return a summary dict (`{"published": n}` etc.) for easy CloudWatch Insights querying.
 
 ## Testing conventions
@@ -65,7 +67,7 @@ task destroy                     # terraform destroy
 - Tests use **moto** (`@mock_aws` / `with mock_aws()`) for all AWS service mocking — no MagicMock for boto3 calls.
 - `src/conftest.py` sets fake AWS credentials and `AWS_CONFIG_FILE=/dev/null` at **module level** (not in a fixture). This is required because handlers create boto3 clients at import time; a fixture would run too late.
 - Each test file has an `aws_resources` pytest fixture that creates real moto-backed infrastructure inside `with mock_aws(): ... yield`. Tests run inside that context.
-- `_scrape_jobs` is still patched with `unittest.mock.patch` since Bedrock is not part of moto's scope.
+- `_fetch_default_jobs` (the Playwright/Strands/Bedrock path) is still patched with `unittest.mock.patch` since Bedrock is not part of moto's scope. The `greenhouse`/`lever`/`workday`/`builtin` fetchers make plain `requests` calls and are tested by mocking `requests` directly instead; `builtin` additionally touches DynamoDB (scans `COMPANIES_TABLE`), which is backed by moto like everything else.
 - pytest uses `--import-mode=importlib` (set in root `pyproject.toml`) to avoid module name collisions across the three `test_handler.py` files.
 - Add tests for every new handler behaviour; verify state in DynamoDB/SQS directly rather than asserting on mock call counts.
 
@@ -81,7 +83,6 @@ task destroy                     # terraform destroy
 
 ## Open TODOs
 
-- `worker/handler.py` `_scrape_jobs`: implement Strands agent with Bedrock tool calls.
 - `orchestrator/handler.py`: add DynamoDB scan pagination for large company lists.
 - `terraform/main.tf` jobs table: add GSI on `discovered_at` for efficient Notifier time-range queries (currently full table scan).
 - `terraform/main.tf` Bedrock IAM: scope `Resource` to specific model ARN once known.

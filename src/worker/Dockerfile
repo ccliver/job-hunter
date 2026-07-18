@@ -46,8 +46,10 @@ RUN playwright install chromium
 # Drop to a non-root user. The browser binaries are chowned so Playwright
 # can read/execute them; the Lambda task root files are world-readable by
 # default (standard COPY umask) so no chown is needed there.
-RUN useradd -m -u 1000 appuser \
-    && chown -R appuser /ms-playwright
-USER appuser
+# useradd isn't available on this base image (no shadow-utils), so chown to
+# a bare numeric UID instead of creating a named user — Lambda doesn't
+# require a passwd entry for the runtime user.
+RUN chown -R 1000 /ms-playwright
+USER 1000
 
 CMD ["worker.handler.handler"]

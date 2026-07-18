@@ -2,8 +2,9 @@
 
 Automated job board monitor. An EventBridge cron fans out one Lambda per company to scrape careers pages, deduplicates results in DynamoDB, and emails a daily digest via SES.
 
-The worker supports three scraping backends:
-- **Greenhouse / Lever** — direct JSON API calls, no LLM needed
+The worker supports five scraping backends:
+- **Greenhouse / Lever / Workday** — direct JSON API calls, no LLM needed
+- **Built In** — scrapes a Built In (builtin.com) search results page (server-rendered HTML, no LLM); since it aggregates postings across many employers, each job carries its own company name and postings from companies already tracked directly elsewhere in `companies.json` are skipped
 - **Custom careers pages** — headless Chromium (Playwright) renders the page, then a Strands/Bedrock agent (Claude Haiku) extracts structured listings
 
 ## Architecture
@@ -52,7 +53,7 @@ EventBridge (cron, 09:00 UTC)
 |-------------|------|---------------|
 | company_name | S    | Partition key |
 | careers_url  | S    | Careers page URL |
-| ats          | S    | ATS backend (`greenhouse`, `lever`, or `unknown`) |
+| ats          | S    | ATS backend (`greenhouse`, `lever`, `workday`, `builtin`, or `unknown`) |
 
 ### `job-hunter-jobs`
 | Attribute     | Type | Role          |
@@ -192,7 +193,7 @@ Edit `companies/companies.json` and run:
 task seed
 ```
 
-Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lever`, or `unknown`):
+Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lever`, `workday`, `builtin`, or `unknown`):
 
 ```json
 [

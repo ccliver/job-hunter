@@ -15,7 +15,9 @@ Environment variables expected:
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+from html import escape
 from typing import Any
 
 import boto3
@@ -48,18 +50,62 @@ def _query_recent_jobs(table: Any, lookback_minutes: int) -> list[dict[str, str]
 
 
 def _build_email_body(jobs: list[dict[str, str]]) -> tuple[str, str]:
-    """Render plain-text and HTML email bodies from a list of job dicts.
+    """Render plain-text and HTML email bodies from a list of job dicts, grouped by company.
 
     Returns:
         Tuple of (text_body, html_body).
     """
-    # TODO: implement proper HTML template
-    lines = [f"- {j['title']} at {j['company']} | {j['url']}" for j in jobs]
-    text_body = "New job postings found:\n\n" + "\n".join(lines)
+    by_company: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for job in jobs:
+        by_company[job["company"]].append(job)
+
+    date_str = datetime.now(UTC).strftime("%B %-d, %Y")
+    header = f"Job Hunter Digest — {len(jobs)} new posting(s), {date_str}"
+
+    text_sections = []
+    html_sections = []
+    for company in sorted(by_company):
+        company_jobs = by_company[company]
+
+        text_lines = []
+        html_rows = []
+        for job in company_jobs:
+            location = job.get("location", "").strip()
+            text_lines.append(f"  - {job['title']}" + (f" ({location})" if location else "") + f"\n    {job['url']}")
+            location_html = (
+                f'<p style="margin:4px 0 0;font-size:13px;color:#8a8a9e;">{escape(location)}</p>' if location else ""
+            )
+            html_rows.append(
+                f'<div style="padding:12px 0;border-bottom:1px solid #eeeef2;">'
+                f'<a href="{escape(job["url"])}" '
+                f'style="font-size:15px;font-weight:600;color:#3454d1;text-decoration:none;">'
+                f"{escape(job['title'])}</a>{location_html}</div>"
+            )
+
+        text_sections.append(f"{company} ({len(company_jobs)})\n" + "\n".join(text_lines))
+        html_sections.append(
+            f'<div style="margin-top:24px;">'
+            f'<p style="margin:0 0 4px;font-size:13px;font-weight:600;color:#6b6b80;'
+            f'text-transform:uppercase;letter-spacing:0.05em;">'
+            f"{escape(company)} &middot; {len(company_jobs)}</p>"
+            f"{''.join(html_rows)}</div>"
+        )
+
+    text_body = header + "\n\n" + "\n\n".join(text_sections)
+
     html_body = (
-        "<p>New job postings found:</p><ul>"
-        + "".join(f"<li><a href='{j['url']}'>{j['title']}</a> at {j['company']}</li>" for j in jobs)
-        + "</ul>"
+        '<!DOCTYPE html><html><body style="margin:0;padding:0;background-color:#f4f4f7;'
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="background-color:#f4f4f7;padding:24px 0;"><tr><td align="center">'
+        '<table role="presentation" width="600" cellpadding="0" cellspacing="0" '
+        'style="background-color:#ffffff;border-radius:8px;overflow:hidden;max-width:600px;">'
+        '<tr><td style="background-color:#1a1a2e;padding:24px 32px;">'
+        f'<p style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">Job Hunter Digest</p>'
+        f'<p style="margin:4px 0 0;color:#a0a0b8;font-size:13px;">'
+        f"{len(jobs)} new posting(s) &middot; {date_str}</p></td></tr>"
+        f'<tr><td style="padding:8px 32px 32px;">{"".join(html_sections)}</td></tr>'
+        "</table></td></tr></table></body></html>"
     )
     return text_body, html_body
 

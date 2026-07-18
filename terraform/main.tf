@@ -65,6 +65,12 @@ resource "aws_iam_role_policy" "worker" {
         Resource = aws_dynamodb_table.jobs.arn
       },
       {
+        Sid      = "DynamoDBScanCompanies"
+        Effect   = "Allow"
+        Action   = ["dynamodb:Scan"]
+        Resource = aws_dynamodb_table.companies.arn
+      },
+      {
         Sid    = "SQSReceive"
         Effect = "Allow"
         Action = [
@@ -180,9 +186,10 @@ resource "aws_lambda_function" "worker" {
 
   environment {
     variables = {
-      JOBS_TABLE     = aws_dynamodb_table.jobs.name
-      BEDROCK_REGION = var.aws_region
-      BEDROCK_MODEL  = var.bedrock_model_id
+      JOBS_TABLE      = aws_dynamodb_table.jobs.name
+      COMPANIES_TABLE = aws_dynamodb_table.companies.name
+      BEDROCK_REGION  = var.aws_region
+      BEDROCK_MODEL   = var.bedrock_model_id
     }
   }
 }

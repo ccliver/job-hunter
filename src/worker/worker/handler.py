@@ -9,10 +9,18 @@ company+title+url as the DynamoDB partition key (job_id).
 ATS backends:
     greenhouse - JSON API; no LLM required
     lever      - JSON API; no LLM required
+    workday    - Unofficial JSON API (cxs); no LLM required
+    builtin    - Built In (builtin.com) search results page; no LLM required.
+                 Aggregates postings across many employers, so each returned
+                 job carries its own "company" key instead of relying on the
+                 SQS message's company_name. Jobs from companies already
+                 tracked directly elsewhere in companies.json are skipped.
     unknown    - Custom careers page; uses Strands/Bedrock (Claude Haiku)
 
 Environment variables expected:
     JOBS_TABLE      - DynamoDB table name for job postings
+    COMPANIES_TABLE - DynamoDB table name for tracked companies (used by the
+                       builtin ATS backend to skip already-tracked companies)
     BEDROCK_REGION  - AWS region for Bedrock (defaults to us-east-1)
     BEDROCK_MODEL   - Bedrock model ID (defaults to Claude Haiku cross-region inference profile)
 """
@@ -30,6 +38,7 @@ import boto3
 import requests
 from aws_lambda_powertools import Logger
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 from playwright.sync_api import sync_playwright
 from strands import Agent
 from strands.models import BedrockModel
@@ -41,6 +50,13 @@ dynamodb = boto3.resource("dynamodb")
 _DEFAULT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _DEFAULT_REGION = "us-east-1"
 _PAGE_CHAR_LIMIT = 15_000
+
+_WORKDAY_URL_RE = re.compile(r"^https://([^./]+)\.(wd\d+)\.myworkdayjobs\.com/([^/?#]+)")
+_WORKDAY_PAGE_SIZE = 20
+_WORKDAY_MAX_JOBS = 500
+
+_BUILTIN_BASE_URL = "https://builtin.com"
+_BUILTIN_MAX_PAGES = 15
 
 # Roles the agent is instructed to extract (used in prompt and post-filter).
 _TARGET_ROLES = [
@@ -64,6 +80,253 @@ _TITLE_KEYWORDS = [
     "staff engineer",
 ]
 
+# Titles matching any of these (case-insensitive) are dropped even if they
+# also match _TITLE_KEYWORDS — management/leadership roles, not IC roles.
+_EXCLUDE_TITLE_KEYWORDS = [
+    "manager",
+    "director",
+]
+
+# Clearance tiers above Public Trust — the highest tier the user will pursue.
+# A "public trust" mention (with none of these) is explicitly allowed.
+_HIGH_CLEARANCE_KEYWORDS = [
+    "top secret",
+    "ts/sci",
+    "ts-sci",
+    "secret clearance",
+    "dod secret",
+    "interim secret",
+    "polygraph",
+    "full scope poly",
+    "ci poly",
+    "sci clearance",
+    "special access program",
+    "sap clearance",
+    "q clearance",
+    "l clearance",
+]
+
+# Unspecified/generic clearance mentions with no level given are treated as
+# excluded too — unspecified clearance postings at defense contractors
+# conventionally mean Secret or above — unless "public trust" is also present.
+_GENERIC_CLEARANCE_KEYWORDS = [
+    "security clearance",
+    "active clearance",
+    "clearance required",
+    "clearance sponsorship",
+    "must possess a clearance",
+    "must obtain a clearance",
+    "eligible for a clearance",
+    "clearable",
+]
+
+# Explicit negations checked before _GENERIC_CLEARANCE_KEYWORDS, since e.g.
+# "no clearance required" would otherwise substring-match "clearance required".
+_NO_CLEARANCE_PHRASES = [
+    "no clearance required",
+    "no security clearance required",
+    "clearance not required",
+    "clearance is not required",
+    "does not require a clearance",
+    "does not require a security clearance",
+]
+
+# Standard US employment-law notice boilerplate that would otherwise
+# false-positive match a clearance keyword despite having nothing to do with
+# government clearance — e.g. the required EPPA notice mentions "polygraph"
+# and is present on nearly every US company's careers page.
+_CLEARANCE_FALSE_POSITIVE_PHRASES = [
+    "employee polygraph protection act",
+]
+
+
+def _requires_excluded_clearance(text: str) -> bool:
+    """Check whether text indicates a clearance requirement above Public Trust.
+
+    Public Trust is the one clearance level the user will pursue, so an
+    explicit "public trust" mention (with no higher-tier keyword present) is
+    allowed, as is an explicit "no clearance required" negation. A
+    generic/unspecified clearance mention with no level given is treated as
+    excluded by default. Known false-positive boilerplate (e.g. the EPPA
+    notice) is stripped before matching.
+    """
+    text_lower = text.lower()
+    for phrase in _CLEARANCE_FALSE_POSITIVE_PHRASES:
+        text_lower = text_lower.replace(phrase, "")
+    if any(kw in text_lower for kw in _HIGH_CLEARANCE_KEYWORDS):
+        return True
+    if "public trust" in text_lower:
+        return False
+    if any(phrase in text_lower for phrase in _NO_CLEARANCE_PHRASES):
+        return False
+    return any(kw in text_lower for kw in _GENERIC_CLEARANCE_KEYWORDS)
+
+
+# Countries, business regions, and common offshore/nearshore tech-hub cities
+# that indicate a non-US location. Deliberately excludes ambiguous names that
+# collide with US places (e.g. "Georgia" the country vs. the US state,
+# "Jordan" the country vs. a common name) — those are left included by
+# default rather than risk hiding a real US posting. Matched with word
+# boundaries (see _NON_US_LOCATION_RE) so short entries like "uk" don't
+# false-positive inside words like "Milwaukee".
+_NON_US_LOCATION_KEYWORDS = [
+    # Business regions
+    "emea",
+    "apac",
+    "latam",
+    # Countries
+    "india",
+    "canada",
+    "united kingdom",
+    "uk",
+    "england",
+    "scotland",
+    "wales",
+    "ireland",
+    "germany",
+    "france",
+    "spain",
+    "italy",
+    "netherlands",
+    "poland",
+    "portugal",
+    "romania",
+    "ukraine",
+    "israel",
+    "australia",
+    "new zealand",
+    "singapore",
+    "japan",
+    "china",
+    "hong kong",
+    "taiwan",
+    "korea",
+    "philippines",
+    "vietnam",
+    "thailand",
+    "malaysia",
+    "indonesia",
+    "pakistan",
+    "bangladesh",
+    "mexico",
+    "brazil",
+    "argentina",
+    "chile",
+    "colombia",
+    "peru",
+    "costa rica",
+    "south africa",
+    "nigeria",
+    "kenya",
+    "egypt",
+    "united arab emirates",
+    "uae",
+    "saudi arabia",
+    "turkey",
+    "switzerland",
+    "austria",
+    "belgium",
+    "denmark",
+    "sweden",
+    "norway",
+    "finland",
+    "czech republic",
+    "hungary",
+    "greece",
+    "russia",
+    # Common offshore/nearshore tech-hub cities (no country name attached)
+    "bangalore",
+    "bengaluru",
+    "hyderabad",
+    "pune",
+    "mumbai",
+    "gurgaon",
+    "gurugram",
+    "noida",
+    "toronto",
+    "vancouver",
+    "montreal",
+    "ottawa",
+    "london",
+    "dublin",
+    "manchester",
+    "edinburgh",
+    "belfast",
+    "berlin",
+    "munich",
+    "frankfurt",
+    "hamburg",
+    "paris",
+    "madrid",
+    "barcelona",
+    "milan",
+    "amsterdam",
+    "warsaw",
+    "krakow",
+    "prague",
+    "budapest",
+    "bucharest",
+    "tel aviv",
+    "herzliya",
+    "tokyo",
+    "seoul",
+    "shanghai",
+    "beijing",
+    "shenzhen",
+    "manila",
+    "ho chi minh",
+    "hanoi",
+    "bangkok",
+    "jakarta",
+    "kuala lumpur",
+    "sydney",
+    "melbourne",
+    "auckland",
+    "wellington",
+    "sao paulo",
+    "são paulo",
+    "mexico city",
+    "bogota",
+    "buenos aires",
+    "cape town",
+    "johannesburg",
+    "lagos",
+    "nairobi",
+    "cairo",
+    "heredia",
+]
+
+_NON_US_LOCATION_RE = re.compile(
+    r"\b(" + "|".join(re.escape(kw) for kw in _NON_US_LOCATION_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_non_us_location(location: str) -> bool:
+    """Check whether a location string indicates a non-US location.
+
+    Defaults to False (kept) for ambiguous or unhelpful strings like a bare
+    "Remote" or "N Locations" — a false negative (a non-US job slipping
+    through) is preferable to a false positive (hiding a real US job over an
+    incidental keyword match).
+    """
+    if not location:
+        return False
+    return bool(_NON_US_LOCATION_RE.search(location))
+
+
+def _title_looks_relevant(title: str) -> bool:
+    """Cheap title-only pre-check mirroring _filter_relevant_jobs's keyword logic.
+
+    Used by fetchers that can fetch a full job description at the cost of an
+    extra request per posting (e.g. Workday), to avoid paying that cost for
+    postings that would be dropped by _filter_relevant_jobs anyway.
+    """
+    title_lower = title.lower()
+    if not any(kw in title_lower for kw in _TITLE_KEYWORDS):
+        return False
+    return not any(kw in title_lower for kw in _EXCLUDE_TITLE_KEYWORDS)
+
 
 def _make_job_id(company: str, title: str, url: str) -> str:
     """Derive a stable deduplication key from company, title, and URL."""
@@ -72,31 +335,49 @@ def _make_job_id(company: str, title: str, url: str) -> str:
 
 
 def _filter_relevant_jobs(jobs: list[dict[str, str]], company: str) -> list[dict[str, str]]:
-    """Drop jobs whose title doesn't match any of the target-role keywords.
+    """Drop jobs whose title doesn't match a target-role keyword, or matches an excluded one.
 
-    Performs case-insensitive substring matching against _TITLE_KEYWORDS.
-    Logs extracted vs. matched counts so the keyword list can be tuned.
+    Performs case-insensitive substring matching against _TITLE_KEYWORDS,
+    then drops any of those matches whose title also hits _EXCLUDE_TITLE_KEYWORDS
+    (management/leadership roles), indicates a clearance requirement above
+    Public Trust, or has a location indicating a non-US posting. The
+    clearance check is title-only here and applies uniformly across every ATS
+    backend; _fetch_greenhouse_jobs and _fetch_workday_jobs additionally check
+    the full job description. Logs extracted vs. matched counts so the
+    keyword lists can be tuned.
 
     Args:
         jobs: Raw list of job dicts with at least a "title" key.
         company: Company name used for structured log context.
 
     Returns:
-        Subset of jobs whose title matched at least one keyword.
+        Subset of jobs whose title matched a target keyword, hit no exclude
+        or excluded-clearance keyword, and whose location isn't non-US.
     """
     matched = [j for j in jobs if any(kw in j.get("title", "").lower() for kw in _TITLE_KEYWORDS)]
+    filtered = [j for j in matched if not any(kw in j["title"].lower() for kw in _EXCLUDE_TITLE_KEYWORDS)]
+    cleared = [j for j in filtered if not _requires_excluded_clearance(j["title"])]
+    us_only = [j for j in cleared if not _is_non_us_location(j.get("location", ""))]
     logger.info(
         "Job filter complete",
         company=company,
         extracted=len(jobs),
         matched=len(matched),
-        dropped=len(jobs) - len(matched),
+        excluded=len(matched) - len(filtered),
+        clearance_excluded=len(filtered) - len(cleared),
+        non_us_excluded=len(cleared) - len(us_only),
+        dropped=len(jobs) - len(us_only),
     )
-    return matched
+    return us_only
 
 
 def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, str]]:
     """Fetch job listings from a Greenhouse JSON API endpoint.
+
+    Requests full job descriptions (content=true) at no extra cost — the
+    Greenhouse list endpoint includes them in the same response — so postings
+    requiring a clearance above Public Trust can be dropped even when the
+    title alone doesn't say so.
 
     Args:
         careers_url: Greenhouse board API URL (already returns JSON).
@@ -105,7 +386,7 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, str]]:
         Normalised list of job dicts with title, url, location keys.
     """
     try:
-        resp = requests.get(careers_url, timeout=30)
+        resp = requests.get(careers_url, params={"content": "true"}, timeout=30)
         resp.raise_for_status()
     except requests.RequestException as exc:
         logger.warning("Greenhouse fetch failed", url=careers_url, error=str(exc))
@@ -122,15 +403,20 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, str]]:
         return []
 
     jobs = []
+    clearance_skipped = 0
     for posting in data.get("jobs", []):
+        title = posting.get("title", "")
+        if _requires_excluded_clearance(f"{title} {posting.get('content', '')}"):
+            clearance_skipped += 1
+            continue
         jobs.append(
             {
-                "title": posting.get("title", ""),
+                "title": title,
                 "url": posting.get("absolute_url", careers_url),
                 "location": posting.get("location", {}).get("name", ""),
             }
         )
-    logger.info("Greenhouse jobs fetched", url=careers_url, count=len(jobs))
+    logger.info("Greenhouse jobs fetched", url=careers_url, count=len(jobs), clearance_skipped=clearance_skipped)
     return jobs
 
 
@@ -170,6 +456,190 @@ def _fetch_lever_jobs(careers_url: str) -> list[dict[str, str]]:
             }
         )
     logger.info("Lever jobs fetched", url=careers_url, count=len(jobs))
+    return jobs
+
+
+def _fetch_workday_job_description(tenant: str, wd: str, site: str, external_path: str) -> str:
+    """Fetch a single Workday posting's full description via its detail endpoint.
+
+    Returns "" on any failure — callers fall back to title-only clearance
+    checking in that case, rather than dropping the job outright over a
+    transient error.
+    """
+    detail_url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}{external_path}"
+    try:
+        resp = requests.get(detail_url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, requests.exceptions.JSONDecodeError) as exc:
+        logger.warning("Workday job detail fetch failed", url=detail_url, error=str(exc))
+        return ""
+    return data.get("jobPostingInfo", {}).get("jobDescription", "")
+
+
+def _fetch_workday_jobs(careers_url: str) -> list[dict[str, str]]:
+    """Fetch job listings from a Workday-hosted careers site via its unofficial JSON API.
+
+    Parses the tenant/site from a myworkdayjobs.com careers URL and paginates
+    the `cxs` search endpoint (there's no public documentation for this API;
+    every Workday tenant exposes it under the same path convention). The
+    search endpoint doesn't return full descriptions, so for postings whose
+    title already looks relevant (_title_looks_relevant), a follow-up request
+    fetches the full description to catch clearance requirements that aren't
+    mentioned in the title (this endpoint is checked, not the search one, to
+    avoid an extra request per posting for the hundreds of irrelevant ones).
+
+    Args:
+        careers_url: Careers URL of the form
+            https://{tenant}.wd{N}.myworkdayjobs.com/{site}.
+
+    Returns:
+        Normalised list of job dicts with title, url, location keys.
+    """
+    match = _WORKDAY_URL_RE.match(careers_url)
+    if not match:
+        logger.warning("Not a parseable myworkdayjobs.com URL", url=careers_url)
+        return []
+    tenant, wd, site = match.groups()
+    base_url = f"https://{tenant}.{wd}.myworkdayjobs.com/{site}"
+    api_url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
+
+    jobs = []
+    clearance_skipped = 0
+    offset = 0
+    while offset < _WORKDAY_MAX_JOBS:
+        try:
+            resp = requests.post(
+                api_url,
+                json={"limit": _WORKDAY_PAGE_SIZE, "offset": offset, "searchText": ""},
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Workday fetch failed", url=api_url, error=str(exc))
+            return []
+
+        try:
+            data = resp.json()
+        except requests.exceptions.JSONDecodeError:
+            logger.warning("Workday response is not JSON", url=api_url)
+            return []
+
+        postings = data.get("jobPostings", [])
+        if not postings:
+            break
+
+        for posting in postings:
+            title = posting.get("title", "")
+            if not _title_looks_relevant(title):
+                continue
+            external_path = posting.get("externalPath", "")
+            description = _fetch_workday_job_description(tenant, wd, site, external_path)
+            if _requires_excluded_clearance(f"{title} {description}"):
+                clearance_skipped += 1
+                continue
+            jobs.append(
+                {
+                    "title": title,
+                    "url": base_url + external_path,
+                    "location": posting.get("locationsText", ""),
+                }
+            )
+
+        offset += _WORKDAY_PAGE_SIZE
+        if offset >= data.get("total", 0):
+            break
+
+    logger.info("Workday jobs fetched", url=careers_url, count=len(jobs), clearance_skipped=clearance_skipped)
+    return jobs
+
+
+def _get_known_company_names() -> set[str]:
+    """Return the lowercased names of companies already tracked in COMPANIES_TABLE."""
+    table = dynamodb.Table(os.environ["COMPANIES_TABLE"])
+    items = table.scan(ProjectionExpression="company_name").get("Items", [])
+    return {item["company_name"].lower() for item in items}
+
+
+def _is_known_company(company: str, known_companies: set[str]) -> bool:
+    """Check whether a Built In company name matches an already-tracked company.
+
+    Uses substring containment (not just exact match) since Built In's display
+    name for a company often differs slightly from companies.json (e.g. "CACI"
+    vs "CACI International", "Coinbase Global, Inc." vs "Coinbase").
+    """
+    company_lower = company.lower()
+    return any(known in company_lower or company_lower in known for known in known_companies)
+
+
+def _builtin_card_text_by_icon(card: Tag, icon_class: str) -> str:
+    """Extract the text sibling next to a Font Awesome icon within a Built In job card."""
+    icon = card.select_one(f".{icon_class}")
+    if not icon:
+        return ""
+    parent = icon.find_parent("div")
+    sibling = parent.find_next_sibling() if parent else None
+    return sibling.get_text(strip=True) if sibling else ""
+
+
+def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, str]]:
+    """Fetch job listings from a Built In (builtin.com) search results page.
+
+    The search page is server-rendered — no Playwright/JS execution needed.
+    Paginates via the `page` query param until a page returns no job cards.
+    Built In aggregates postings across many employers, so each job dict
+    carries its own "company" key; jobs from companies already tracked
+    directly elsewhere in companies.json are skipped (they're covered, often
+    more completely, by their own direct fetch).
+
+    Args:
+        careers_url: A Built In search URL, e.g.
+            https://builtin.com/jobs?search=AWS&daysSinceUpdated=3
+
+    Returns:
+        Normalised list of job dicts with title, url, location, and company keys.
+    """
+    known_companies = _get_known_company_names()
+
+    jobs = []
+    for page in range(1, _BUILTIN_MAX_PAGES + 1):
+        try:
+            resp = requests.get(
+                careers_url,
+                params={"page": page},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Built In fetch failed", url=careers_url, page=page, error=str(exc))
+            return []
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select('[data-id="job-card"]')
+        if not cards:
+            break
+
+        for card in cards:
+            title_el = card.select_one('[data-id="job-card-title"]')
+            company_el = card.select_one('[data-id="company-title"]')
+            if not title_el or not company_el:
+                continue
+            company = company_el.get_text(strip=True)
+            if _is_known_company(company, known_companies):
+                continue
+            href = title_el.get("href", "")
+            jobs.append(
+                {
+                    "title": title_el.get_text(strip=True),
+                    "url": _BUILTIN_BASE_URL + (href if isinstance(href, str) else ""),
+                    "location": _builtin_card_text_by_icon(card, "fa-location-dot"),
+                    "company": company,
+                }
+            )
+
+    logger.info("Built In jobs fetched", url=careers_url, count=len(jobs))
     return jobs
 
 
@@ -224,8 +694,11 @@ def _fetch_default_jobs(company_name: str, careers_url: str) -> list[dict[str, s
         "1. Only return URLs that appear verbatim in the page content. Never construct, infer, or modify URLs.\n"
         "2. If you cannot find a complete, valid URL for a job listing, omit that job entirely.\n"
         "3. Return only jobs relevant to platform engineering, SRE, DevOps, cloud, or infrastructure roles.\n"
-        "4. Return results as a JSON array with fields: title, url, location.\n"
-        "5. If no relevant jobs are found, return an empty array.\n\n"
+        "4. Omit any job that requires a security clearance above Public Trust (e.g. Secret, Top Secret, "
+        "TS/SCI, polygraph). Jobs requiring only a Public Trust clearance, or no clearance at all, are fine "
+        "to include.\n"
+        "5. Return results as a JSON array with fields: title, url, location.\n"
+        "6. If no relevant jobs are found, return an empty array.\n\n"
         f"Page content:\n{page_text}"
     )
 
@@ -265,15 +738,21 @@ def _fetch_jobs(company_name: str, careers_url: str, ats: str) -> list[dict[str,
     Args:
         company_name: Used for logging and LLM prompt context.
         careers_url: URL passed to the ATS handler.
-        ats: ATS backend identifier ("greenhouse", "lever", or "unknown").
+        ats: ATS backend identifier ("greenhouse", "lever", "workday", "builtin", or "unknown").
 
     Returns:
-        Normalised list of job dicts with title, url, location keys.
+        Normalised list of job dicts with title, url, location keys (plus a
+        "company" key for the "builtin" backend, which aggregates postings
+        across many employers).
     """
     if ats == "greenhouse":
         return _fetch_greenhouse_jobs(careers_url)
     if ats == "lever":
         return _fetch_lever_jobs(careers_url)
+    if ats == "workday":
+        return _fetch_workday_jobs(careers_url)
+    if ats == "builtin":
+        return _fetch_builtin_jobs(careers_url)
     return _fetch_default_jobs(company_name, careers_url)
 
 
@@ -311,10 +790,13 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         )
 
         for job in jobs:
-            job_id = _make_job_id(company_name, job["title"], job["url"])
+            # "builtin" jobs carry their own company (Built In aggregates across
+            # employers); every other backend's jobs belong to company_name.
+            job_company = job.get("company") or company_name
+            job_id = _make_job_id(job_company, job["title"], job["url"])
             item = {
                 "job_id": job_id,
-                "company": company_name,
+                "company": job_company,
                 "title": job["title"],
                 "url": job["url"],
                 "location": job.get("location", ""),
@@ -327,7 +809,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                     ConditionExpression="attribute_not_exists(job_id)",
                 )
                 jobs_written += 1
-                logger.info("Wrote new job", title=job["title"], company=company_name)
+                logger.info("Wrote new job", title=job["title"], company=job_company)
             except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
                 logger.debug("Duplicate skipped", job_id=job_id)
 
