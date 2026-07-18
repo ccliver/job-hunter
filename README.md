@@ -7,6 +7,8 @@ The worker supports five scraping backends:
 - **Built In** — scrapes a Built In (builtin.com) search results page (server-rendered HTML, no LLM); since it aggregates postings across many employers, each job carries its own company name and postings from companies already tracked directly elsewhere in `companies.json` are skipped
 - **Custom careers pages** — headless Chromium (Playwright) renders the page, then a Strands/Bedrock agent (Claude Haiku) extracts structured listings
 
+Beyond ATS-specific scraping, every job is passed through a relevance filter before being written to DynamoDB: it must match a target-role keyword (platform/SRE/DevOps/cloud/infrastructure/staff engineer), must not look like a management role, must not require a security clearance above Public Trust, and must not be a non-US posting. See `worker/handler.py:_filter_relevant_jobs`.
+
 ## Architecture
 
 ```
@@ -25,11 +27,11 @@ EventBridge (cron, 09:00 UTC)
          │ trigger (batch_size=1)
          ▼
 ┌─────────────────┐
-│  Worker Lambda  │── Greenhouse/Lever ──▶ JSON API
-│  (container)    │
+│  Worker Lambda  │── Greenhouse/Lever/Workday ──▶ JSON API
+│  (container)    │── Built In ──▶ builtin.com search page (HTML)
 │                 │── Custom page ──▶ Playwright + Strands/Bedrock (Claude Haiku)
 └────────┬────────┘
-         │ PutItem (deduplicated)
+         │ filter (relevance, clearance, US-only) + PutItem (deduplicated)
          ▼
 ┌──────────────────┐
 │  DynamoDB        │
@@ -41,7 +43,7 @@ EventBridge (cron, 09:00 UTC)
 │  Notifier       │◀── EventBridge (cron, 09:30 UTC)
 │  Lambda         │
 └────────┬────────┘
-         │ SendEmail
+         │ SendEmail (HTML digest, grouped by company)
          ▼
        SES → your inbox
 ```

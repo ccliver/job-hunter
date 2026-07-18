@@ -7,7 +7,8 @@ job-hunter is an AWS serverless application that monitors company careers pages 
 ```
 EventBridge cron → Orchestrator Lambda → SQS (1 msg/company)
                                               ↓
-                              Worker Lambda (Strands + Bedrock/Claude Haiku)
+                    Worker Lambda (Greenhouse/Lever/Workday/Built In APIs,
+                                    or Playwright + Strands/Bedrock for unknown ATS)
                                               ↓
                                        DynamoDB jobs table
                                               ↑
@@ -17,6 +18,8 @@ EventBridge cron (+30min) → Notifier Lambda → SES email digest
 ## Repo layout
 
 ```
+companies/
+  companies.json                 # seed data for the companies table (task seed)
 src/
   conftest.py                    # sets fake AWS creds at module level for pytest
   orchestrator/
@@ -35,7 +38,7 @@ terraform/
   backend.tf                     # S3 backend stub (populated via backend.hcl)
   variables.tf
   outputs.tf
-Taskfile.yml                     # task deploy / task destroy (uses AWS_PROFILE=lab)
+Taskfile.yml                     # task apply / task destroy (uses AWS_PROFILE=lab)
 ```
 
 ## Development commands
@@ -48,7 +51,7 @@ uv run ruff check src/           # lint
 uv run ruff format src/          # format
 uv run ty check src/             # type check
 uv run pre-commit run --all-files  # run all pre-commit hooks manually
-task deploy                      # terraform init + apply (uses AWS_PROFILE=lab)
+task apply                       # build all artifacts + terraform init/apply (uses AWS_PROFILE=lab)
 task destroy                     # terraform destroy
 ```
 
@@ -60,6 +63,7 @@ task destroy                     # terraform destroy
 - `worker/handler.py:_fetch_jobs` dispatches on the `ats` field to one of: `greenhouse`, `lever`, `workday` (all JSON API calls, no LLM), `builtin` (scrapes a Built In search results page — server-rendered HTML, no LLM; aggregates across employers so each job carries its own `company` key and jobs from companies already tracked directly are skipped, via a `dynamodb:Scan` on `COMPANIES_TABLE`), or the `unknown` default which drives a Playwright + Strands/Bedrock (Claude Haiku) scrape.
 - `worker/handler.py:_filter_relevant_jobs` also drops jobs indicating a clearance requirement above Public Trust (`_requires_excluded_clearance`), title-only and applied uniformly across every backend. `_fetch_greenhouse_jobs` additionally checks the full job description (Greenhouse's list API returns it for free via `content=true`). `_fetch_workday_jobs` does too, via a per-posting follow-up request to the Workday job-detail endpoint (`.../wday/cxs/{tenant}/{site}{externalPath}`) — but only for postings whose title already passes `_title_looks_relevant`, to avoid one extra request per irrelevant posting; a failed detail fetch falls back to title-only checking rather than dropping the job. Built In and the LLM path rely on title/page text only, except the LLM prompt is also instructed to exclude clearance-gated postings it sees in the full page text.
 - `worker/handler.py:_filter_relevant_jobs` also drops jobs whose `location` matches `_is_non_us_location` — a word-boundary regex over a curated list of countries/regions/offshore-hub cities (`_NON_US_LOCATION_KEYWORDS`). Defaults to keeping ambiguous locations (bare "Remote", "N Locations", empty) rather than risk hiding a real US posting; deliberately omits US/non-US-ambiguous names (e.g. "Georgia") for the same reason.
+- `notifier/handler.py:_build_email_body` renders an HTML digest (styled, table-based for email-client compatibility) plus a plain-text fallback, both grouped by company with location shown. All interpolated values are HTML-escaped.
 - Lambda handlers return a summary dict (`{"published": n}` etc.) for easy CloudWatch Insights querying.
 
 ## Testing conventions
@@ -76,7 +80,7 @@ task destroy                     # terraform destroy
 - All resources use `local.prefix` (`"job-hunter"`) for naming.
 - Single deployment target — no environment variable, no workspaces.
 - Backend config is in `backend.hcl` (gitignored, account-specific) and passed via `terraform init -backend-config=backend.hcl`.
-- Lambda ZIPs are built by `archive_file` data sources in `main.tf` — packaging strategy is a known TODO (no pip install into zip yet).
+- Lambda ZIPs for orchestrator/notifier are built by `task build` (pip-installs dependencies into `terraform/.build/{name}`, then zips); `main.tf` just references the resulting `.build/*.zip` via `filebase64sha256` for `source_code_hash`. The worker ships as a container image instead (`task build-worker`: build, push to ECR, then `aws lambda update-function-code` — the Lambda resource's `image_uri` is a static `:latest` tag Terraform never sees change, so that explicit CLI call is what actually deploys new worker code).
 - IAM policies follow least-privilege per Lambda; Bedrock policy is currently `Resource = "*"` pending a known model ARN.
 - SQS queues use `sqs_managed_sse_enabled = true`.
 - DynamoDB tables use `PAY_PER_REQUEST` billing.
@@ -86,7 +90,6 @@ task destroy                     # terraform destroy
 - `orchestrator/handler.py`: add DynamoDB scan pagination for large company lists.
 - `terraform/main.tf` jobs table: add GSI on `discovered_at` for efficient Notifier time-range queries (currently full table scan).
 - `terraform/main.tf` Bedrock IAM: scope `Resource` to specific model ARN once known.
-- Lambda packaging: replace `archive_file` source-dir zips with a proper packaging step that includes pip-installed dependencies.
 
 ## CI
 
