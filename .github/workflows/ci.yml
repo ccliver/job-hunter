@@ -45,6 +45,18 @@ jobs:
           tar -xzf terraform-docs.tar.gz terraform-docs
           sudo mv terraform-docs /usr/local/bin/
 
+      - name: Set up Python 3.13 for pip
+        # Needed only so the "Build Lambda ZIPs" step below has a real pip
+        # bound to Python 3.13 on PATH. `uv python install` (above) manages
+        # its own interpreter without exposing a normal pip, and uv-managed
+        # venvs don't ship pip by default — `uv pip install` was tried as a
+        # replacement but it enforces --only-binary against the local
+        # orchestrator/notifier source packages too (pip only enforces it
+        # for index-resolved packages), which breaks the local package build.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Build Lambda ZIPs
         # terraform_validate needs these to exist locally: main.tf hashes them
         # via filebase64sha256 for source_code_hash, and terraform/.build/ is
