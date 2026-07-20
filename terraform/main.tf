@@ -186,10 +186,14 @@ resource "aws_lambda_function" "worker" {
 
   environment {
     variables = {
-      JOBS_TABLE      = aws_dynamodb_table.jobs.name
-      COMPANIES_TABLE = aws_dynamodb_table.companies.name
-      BEDROCK_REGION  = var.aws_region
-      BEDROCK_MODEL   = var.bedrock_model_id
+      JOBS_TABLE        = aws_dynamodb_table.jobs.name
+      COMPANIES_TABLE   = aws_dynamodb_table.companies.name
+      BEDROCK_REGION    = var.aws_region
+      BEDROCK_MODEL     = var.bedrock_model_id
+      BUILTIN_LOCATION  = var.builtin_location
+      BUILTIN_WORK_TYPE = var.builtin_work_type
+      LOCATION          = var.location
+      WORK_TYPE         = var.work_type
     }
   }
 }

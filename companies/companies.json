@@ -30,5 +30,11 @@
   {"company_name": "Okta", "careers_url": "https://boards-api.greenhouse.io/v1/boards/okta/jobs", "ats": "greenhouse"},
   {"company_name": "New Relic", "careers_url": "https://boards-api.greenhouse.io/v1/boards/newrelic/jobs", "ats": "greenhouse"},
   {"company_name": "Zscaler", "careers_url": "https://boards-api.greenhouse.io/v1/boards/zscaler/jobs", "ats": "greenhouse"},
-  {"company_name": "Built In - AWS Search", "careers_url": "https://builtin.com/jobs?search=AWS&daysSinceUpdated=3", "ats": "builtin"}
+  {"company_name": "Built In - AWS Search", "careers_url": "https://builtin.com/jobs?search=AWS&daysSinceUpdated=3", "ats": "builtin"},
+  {"company_name": "Parsons Corporation", "careers_url": "https://parsons.wd5.myworkdayjobs.com/Search", "ats": "workday"},
+  {"company_name": "Guidehouse", "careers_url": "https://guidehouse.wd1.myworkdayjobs.com/External", "ats": "workday"},
+  {"company_name": "Northrop Grumman", "careers_url": "https://ngc.wd1.myworkdayjobs.com/Northrop_Grumman_External_Site", "ats": "workday"},
+  {"company_name": "Accenture Federal Services", "careers_url": "https://boards-api.greenhouse.io/v1/boards/accenturefederalservices/jobs", "ats": "greenhouse"},
+  {"company_name": "Palantir", "careers_url": "https://api.lever.co/v0/postings/palantir", "ats": "lever"},
+  {"company_name": "SAIC", "careers_url": "https://jobs.saic.com/search/jobs", "ats": "unknown"}
 ]

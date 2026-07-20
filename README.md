@@ -7,7 +7,7 @@ The worker supports five scraping backends:
 - **Built In** — scrapes a Built In (builtin.com) search results page (server-rendered HTML, no LLM); since it aggregates postings across many employers, each job carries its own company name and postings from companies already tracked directly elsewhere in `companies.json` are skipped
 - **Custom careers pages** — headless Chromium (Playwright) renders the page, then a Strands/Bedrock agent (Claude Haiku) extracts structured listings
 
-Beyond ATS-specific scraping, every job is passed through a relevance filter before being written to DynamoDB: it must match a target-role keyword (platform/SRE/DevOps/cloud/infrastructure/staff engineer), must not look like a management role, must not require a security clearance above Public Trust, and must not be a non-US posting. See `worker/handler.py:_filter_relevant_jobs`.
+Beyond ATS-specific scraping, every job is passed through a relevance filter before being written to DynamoDB: it must match a target-role keyword (platform/SRE/DevOps/cloud/infrastructure/staff engineer), must not look like a management role, must not require a security clearance above Public Trust, must not be a non-US posting, and must match a configurable location/work-type preference (defaults to remote-only — see [Configuration](#configuration)). See `worker/handler.py:_filter_relevant_jobs`.
 
 ## Architecture
 
@@ -31,7 +31,7 @@ EventBridge (cron, 09:00 UTC)
 │  (container)    │── Built In ──▶ builtin.com search page (HTML)
 │                 │── Custom page ──▶ Playwright + Strands/Bedrock (Claude Haiku)
 └────────┬────────┘
-         │ filter (relevance, clearance, US-only) + PutItem (deduplicated)
+         │ filter (relevance, clearance, US-only, work-type) + PutItem (deduplicated)
          ▼
 ┌──────────────────┐
 │  DynamoDB        │
@@ -203,6 +203,20 @@ Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lev
   {"company_name": "Example Inc", "careers_url": "https://example.com/careers", "ats": "unknown"}
 ]
 ```
+
+## Configuration
+
+Set these in `terraform/terraform.tfvars` (see `terraform/variables.tf` for the full list, including Lambda sizing/timeouts and cron schedules). All have defaults, so none are required.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `bedrock_model_id` | Claude Haiku (cross-region inference profile) | Model used by the `unknown`-ATS scraping agent |
+| `location` | `""` (disabled) | Location substring to additionally keep, for every backend except `builtin` |
+| `work_type` | `"remote"` | Work-type keyword to keep (`remote`, `hybrid`, `office`, `any`, or any literal substring), for every backend except `builtin` |
+| `builtin_location` | `""` (disabled) | Same as `location`, but for the `builtin` backend only — independent setting |
+| `builtin_work_type` | `"remote"` | Same as `work_type`, but for the `builtin` backend only — independent setting |
+
+`location`/`work_type` and `builtin_location`/`builtin_work_type` are deliberately separate: the curated company list often includes companies chosen for proximity to a specific place (e.g. a planned relocation), so a hybrid/on-site preference there shouldn't share Built In's broad-discovery "remote only" default. A job passes if it matches *either* the configured location *or* the work type (not both) — e.g. with `location = "Reston, VA"` and `work_type = "remote"`, both a Reston-based posting and a fully-remote posting anywhere would pass.
 
 ## CI
 

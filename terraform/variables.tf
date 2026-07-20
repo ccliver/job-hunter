@@ -38,6 +38,30 @@ variable "bedrock_model_id" {
   default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
+variable "builtin_location" {
+  description = "Location substring to additionally keep for the Built In (builtin.com) ATS backend; blank disables it (remote-only)"
+  type        = string
+  default     = ""
+}
+
+variable "builtin_work_type" {
+  description = "Work-type keyword to keep for the Built In ATS backend (remote, hybrid, office, any, or any literal substring)"
+  type        = string
+  default     = "remote"
+}
+
+variable "location" {
+  description = "Location substring to additionally keep for every ATS backend except builtin; blank disables it (remote-only). Independent of builtin_location"
+  type        = string
+  default     = ""
+}
+
+variable "work_type" {
+  description = "Work-type keyword to keep for every ATS backend except builtin (remote, hybrid, office, any, or any literal substring). Independent of builtin_work_type"
+  type        = string
+  default     = "remote"
+}
+
 variable "lambda_timeout_seconds" {
   description = "Lambda function timeout in seconds"
   type        = number

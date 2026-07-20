@@ -23,6 +23,16 @@ Environment variables expected:
                        builtin ATS backend to skip already-tracked companies)
     BEDROCK_REGION  - AWS region for Bedrock (defaults to us-east-1)
     BEDROCK_MODEL   - Bedrock model ID (defaults to Claude Haiku cross-region inference profile)
+    LOCATION          - Location substring to additionally keep for every ATS
+                         backend except builtin (defaults to "" — disabled,
+                         i.e. remote-only)
+    WORK_TYPE         - Work-type keyword to keep for every ATS backend except
+                         builtin: "remote", "hybrid", "office", "any", or any
+                         other literal substring to match (defaults to "remote")
+    BUILTIN_LOCATION  - Same as LOCATION, but for the builtin ATS backend only
+                         — independent setting (defaults to "" — disabled)
+    BUILTIN_WORK_TYPE - Same as WORK_TYPE, but for the builtin ATS backend only
+                         — independent setting (defaults to "remote")
 """
 
 from __future__ import annotations
@@ -57,6 +67,25 @@ _WORKDAY_MAX_JOBS = 500
 
 _BUILTIN_BASE_URL = "https://builtin.com"
 _BUILTIN_MAX_PAGES = 15
+
+# Defaults for the LOCATION/WORK_TYPE and BUILTIN_LOCATION/BUILTIN_WORK_TYPE
+# env var pairs (see _location_matches / _builtin_location_matches). Kept
+# deliberately independent: Built In is a broad discovery search where
+# remote-only is a sensible default, while the curated company list includes
+# companies chosen for their proximity to a specific future location (e.g.
+# NoVA defense contractors), so filtering both off the same setting would
+# suppress exactly the hybrid/on-site roles those companies were added for.
+# Both default location to blank (disabled) and work type to "remote".
+_DEFAULT_LOCATION = ""
+_DEFAULT_WORK_TYPE = "remote"
+_BUILTIN_DEFAULT_LOCATION = ""
+_BUILTIN_DEFAULT_WORK_TYPE = "remote"
+
+_WORK_TYPE_KEYWORDS = {
+    "remote": ["remote", "distributed", "anywhere"],
+    "hybrid": ["hybrid"],
+    "office": ["in-office", "in office", "on-site", "onsite"],
+}
 
 # Roles the agent is instructed to extract (used in prompt and post-filter).
 _TARGET_ROLES = [
@@ -340,11 +369,16 @@ def _filter_relevant_jobs(jobs: list[dict[str, str]], company: str) -> list[dict
     Performs case-insensitive substring matching against _TITLE_KEYWORDS,
     then drops any of those matches whose title also hits _EXCLUDE_TITLE_KEYWORDS
     (management/leadership roles), indicates a clearance requirement above
-    Public Trust, or has a location indicating a non-US posting. The
-    clearance check is title-only here and applies uniformly across every ATS
-    backend; _fetch_greenhouse_jobs and _fetch_workday_jobs additionally check
-    the full job description. Logs extracted vs. matched counts so the
-    keyword lists can be tuned.
+    Public Trust, has a location indicating a non-US posting, or (for every
+    backend except "builtin") doesn't match the configured LOCATION/WORK_TYPE.
+    Built In jobs are exempt from that last check since they're already
+    filtered by their own independent BUILTIN_LOCATION/BUILTIN_WORK_TYPE
+    config in _fetch_builtin_jobs — detected here via the per-job "company"
+    key, which only the builtin backend sets. The clearance check is
+    title-only here and applies uniformly across every ATS backend;
+    _fetch_greenhouse_jobs, _fetch_workday_jobs, and _fetch_builtin_jobs
+    additionally check the full job description. Logs extracted vs. matched
+    counts so the keyword lists can be tuned.
 
     Args:
         jobs: Raw list of job dicts with at least a "title" key.
@@ -352,12 +386,14 @@ def _filter_relevant_jobs(jobs: list[dict[str, str]], company: str) -> list[dict
 
     Returns:
         Subset of jobs whose title matched a target keyword, hit no exclude
-        or excluded-clearance keyword, and whose location isn't non-US.
+        or excluded-clearance keyword, whose location isn't non-US, and
+        (unless from the builtin backend) matches the configured work type.
     """
     matched = [j for j in jobs if any(kw in j.get("title", "").lower() for kw in _TITLE_KEYWORDS)]
     filtered = [j for j in matched if not any(kw in j["title"].lower() for kw in _EXCLUDE_TITLE_KEYWORDS)]
     cleared = [j for j in filtered if not _requires_excluded_clearance(j["title"])]
     us_only = [j for j in cleared if not _is_non_us_location(j.get("location", ""))]
+    work_type_matched = [j for j in us_only if "company" in j or _location_matches(j.get("location", ""))]
     logger.info(
         "Job filter complete",
         company=company,
@@ -366,9 +402,10 @@ def _filter_relevant_jobs(jobs: list[dict[str, str]], company: str) -> list[dict
         excluded=len(matched) - len(filtered),
         clearance_excluded=len(filtered) - len(cleared),
         non_us_excluded=len(cleared) - len(us_only),
-        dropped=len(jobs) - len(us_only),
+        work_type_excluded=len(us_only) - len(work_type_matched),
+        dropped=len(jobs) - len(work_type_matched),
     )
-    return us_only
+    return work_type_matched
 
 
 def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, str]]:
@@ -573,6 +610,68 @@ def _is_known_company(company: str, known_companies: set[str]) -> bool:
     return any(known in company_lower or company_lower in known for known in known_companies)
 
 
+def _work_type_matches(
+    location: str, location_env_var: str, work_type_env_var: str, default_location: str, default_work_type: str
+) -> bool:
+    """Shared implementation behind _location_matches and _builtin_location_matches.
+
+    A job is kept if its location contains the configured target location
+    substring, or its location indicates the configured work type (or the
+    work type env var is "any", or its value isn't a recognised keyword, in
+    which case it's matched literally as a substring too). If the work type
+    is "any" and no target location is configured, the whole check is
+    disabled and every job passes, blank location included. Otherwise an
+    empty location fails the match — this filter narrows down to a specific
+    set, unlike the fail-open non-US location filter.
+    """
+    target_location = os.environ.get(location_env_var, default_location)
+    work_type = os.environ.get(work_type_env_var, default_work_type).lower()
+
+    if not target_location and work_type == "any":
+        return True
+
+    if not location:
+        return False
+    location_lower = location.lower()
+
+    if target_location and target_location.lower() in location_lower:
+        return True
+    if work_type == "any":
+        return True
+    keywords = _WORK_TYPE_KEYWORDS.get(work_type, [work_type])
+    return any(kw in location_lower for kw in keywords)
+
+
+def _location_matches(location: str) -> bool:
+    """Check a job's location against the configured LOCATION / WORK_TYPE env vars.
+
+    Applies to every ATS backend except "builtin", which has its own
+    independent BUILTIN_LOCATION / BUILTIN_WORK_TYPE config (see
+    _builtin_location_matches) — kept separate because the curated company
+    list includes companies chosen for proximity to a specific future
+    location, so a hybrid/on-site preference there shouldn't be governed by
+    the same "remote only" default that makes sense for Built In's broad
+    discovery search. Defaults to remote-only. See _work_type_matches for
+    the shared matching rules.
+    """
+    return _work_type_matches(location, "LOCATION", "WORK_TYPE", _DEFAULT_LOCATION, _DEFAULT_WORK_TYPE)
+
+
+def _builtin_location_matches(location: str) -> bool:
+    """Check a Built In job's location against the configured target location or work type.
+
+    Controlled by the BUILTIN_LOCATION (default "" — disabled) and
+    BUILTIN_WORK_TYPE (default "remote") env vars, independent of the
+    LOCATION / WORK_TYPE env vars used by every other backend (see
+    _location_matches). Defaults to pure remote-only filtering, matching the
+    user's own manual search practice on builtin.com (leave location blank,
+    filter to Remote). See _work_type_matches for the shared matching rules.
+    """
+    return _work_type_matches(
+        location, "BUILTIN_LOCATION", "BUILTIN_WORK_TYPE", _BUILTIN_DEFAULT_LOCATION, _BUILTIN_DEFAULT_WORK_TYPE
+    )
+
+
 def _builtin_card_text_by_icon(card: Tag, icon_class: str) -> str:
     """Extract the text sibling next to a Font Awesome icon within a Built In job card."""
     icon = card.select_one(f".{icon_class}")
@@ -583,6 +682,26 @@ def _builtin_card_text_by_icon(card: Tag, icon_class: str) -> str:
     return sibling.get_text(strip=True) if sibling else ""
 
 
+def _fetch_builtin_job_description(url: str) -> str:
+    """Fetch a single Built In job's detail page and return its cleaned text.
+
+    The full description is present in the server-rendered page — no special
+    container selector needed. Returns "" on any failure — callers fall back
+    to title-only clearance checking in that case, rather than dropping the
+    job outright over a transient error.
+    """
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("Built In job detail fetch failed", url=url, error=str(exc))
+        return ""
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
+        tag.decompose()
+    return soup.get_text(separator=" ", strip=True)
+
+
 def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, str]]:
     """Fetch job listings from a Built In (builtin.com) search results page.
 
@@ -591,7 +710,15 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, str]]:
     Built In aggregates postings across many employers, so each job dict
     carries its own "company" key; jobs from companies already tracked
     directly elsewhere in companies.json are skipped (they're covered, often
-    more completely, by their own direct fetch).
+    more completely, by their own direct fetch). The search results don't
+    include job descriptions, so for postings whose title already looks
+    relevant (_title_looks_relevant), a follow-up request to the job's own
+    detail page fetches the full description to catch clearance requirements
+    that aren't mentioned in the title — same pattern as _fetch_workday_jobs,
+    and for the same reason (avoid an extra request per irrelevant posting).
+    Postings are also dropped by _builtin_location_matches (BUILTIN_LOCATION /
+    BUILTIN_WORK_TYPE env vars) before the description fetch, for the same
+    cost-avoidance reason.
 
     Args:
         careers_url: A Built In search URL, e.g.
@@ -603,6 +730,8 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, str]]:
     known_companies = _get_known_company_names()
 
     jobs = []
+    location_skipped = 0
+    clearance_skipped = 0
     for page in range(1, _BUILTIN_MAX_PAGES + 1):
         try:
             resp = requests.get(
@@ -629,17 +758,35 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, str]]:
             company = company_el.get_text(strip=True)
             if _is_known_company(company, known_companies):
                 continue
+            title = title_el.get_text(strip=True)
+            if not _title_looks_relevant(title):
+                continue
+            location = _builtin_card_text_by_icon(card, "fa-location-dot")
+            if not _builtin_location_matches(location):
+                location_skipped += 1
+                continue
             href = title_el.get("href", "")
+            job_url = _BUILTIN_BASE_URL + (href if isinstance(href, str) else "")
+            description = _fetch_builtin_job_description(job_url)
+            if _requires_excluded_clearance(f"{title} {description}"):
+                clearance_skipped += 1
+                continue
             jobs.append(
                 {
-                    "title": title_el.get_text(strip=True),
-                    "url": _BUILTIN_BASE_URL + (href if isinstance(href, str) else ""),
-                    "location": _builtin_card_text_by_icon(card, "fa-location-dot"),
+                    "title": title,
+                    "url": job_url,
+                    "location": location,
                     "company": company,
                 }
             )
 
-    logger.info("Built In jobs fetched", url=careers_url, count=len(jobs))
+    logger.info(
+        "Built In jobs fetched",
+        url=careers_url,
+        count=len(jobs),
+        location_skipped=location_skipped,
+        clearance_skipped=clearance_skipped,
+    )
     return jobs
 
 

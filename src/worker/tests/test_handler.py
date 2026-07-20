@@ -11,12 +11,14 @@ import requests
 from moto import mock_aws
 
 from worker.handler import (
+    _builtin_location_matches,
     _fetch_builtin_jobs,
     _fetch_greenhouse_jobs,
     _fetch_jobs,
     _fetch_workday_jobs,
     _filter_relevant_jobs,
     _is_non_us_location,
+    _location_matches,
     _make_job_id,
     _requires_excluded_clearance,
     handler,
@@ -479,14 +481,22 @@ def _seed_companies(companies_table, *names: str) -> None:
         companies_table.put_item(Item={"company_name": name})
 
 
-def _mock_get_pages(mock_get, *pages: str) -> None:
-    """Wire mock_get.side_effect to return each page in turn, then an empty page forever."""
+def _mock_builtin_gets(mock_get, pages: list[str], description: str = "No clearance required.") -> None:
+    """Wire mock_get.side_effect for both search-page and job-detail-page calls.
+
+    Search-page requests carry a "page" key in their params kwarg; job-detail
+    requests (_fetch_builtin_job_description) don't pass params at all, so
+    responses are dispatched based on that.
+    """
     responses = list(pages) + [_builtin_page_html([])]
 
     def fake_get(*args, **kwargs):
         mock_resp = MagicMock()
-        mock_resp.text = responses.pop(0) if len(responses) > 1 else responses[0]
         mock_resp.raise_for_status.return_value = None
+        if kwargs.get("params", {}).get("page"):
+            mock_resp.text = responses.pop(0) if len(responses) > 1 else responses[0]
+        else:
+            mock_resp.text = f"<html><body>{description}</body></html>"
         return mock_resp
 
     mock_get.side_effect = fake_get
@@ -495,11 +505,13 @@ def _mock_get_pages(mock_get, *pages: str) -> None:
 @patch("worker.handler.requests.get")
 def test_fetch_builtin_jobs_single_page(mock_get, aws_resources: dict) -> None:
     """_fetch_builtin_jobs should normalise job cards, including a per-job company key."""
-    _mock_get_pages(
+    _mock_builtin_gets(
         mock_get,
-        _builtin_page_html(
-            [_builtin_card_html("Senior Platform Engineer", "/job/senior-platform-engineer/123", "ZS", "Remote")]
-        ),
+        [
+            _builtin_page_html(
+                [_builtin_card_html("Senior Platform Engineer", "/job/senior-platform-engineer/123", "ZS", "Remote")]
+            )
+        ],
     )
 
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
@@ -513,22 +525,26 @@ def test_fetch_builtin_jobs_single_page(mock_get, aws_resources: dict) -> None:
         }
     ]
     assert mock_get.call_args_list[0].kwargs["params"] == {"page": 1}
+    # Second call is the description fetch for the one relevant-titled posting.
+    assert mock_get.call_args_list[1].args[0] == "https://builtin.com/job/senior-platform-engineer/123"
 
 
 @patch("worker.handler.requests.get")
 def test_fetch_builtin_jobs_paginates_until_empty_page(mock_get, aws_resources: dict) -> None:
     """_fetch_builtin_jobs should keep requesting pages until one comes back with no job cards."""
-    _mock_get_pages(
+    _mock_builtin_gets(
         mock_get,
-        _builtin_page_html([_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Remote")]),
-        _builtin_page_html([_builtin_card_html("SRE", "/job/sre/2", "Beta Corp", "NYC")]),
+        [
+            _builtin_page_html([_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Remote")]),
+            _builtin_page_html([_builtin_card_html("SRE", "/job/sre/2", "Beta Corp", "Remote")]),
+        ],
     )
 
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
 
     assert len(jobs) == 2
-    assert mock_get.call_count == 3
-    pages = [call.kwargs["params"]["page"] for call in mock_get.call_args_list]
+    search_calls = [c for c in mock_get.call_args_list if c.kwargs.get("params", {}).get("page")]
+    pages = [c.kwargs["params"]["page"] for c in search_calls]
     assert pages == [1, 2, 3]
 
 
@@ -536,14 +552,16 @@ def test_fetch_builtin_jobs_paginates_until_empty_page(mock_get, aws_resources: 
 def test_fetch_builtin_jobs_skips_known_companies(mock_get, aws_resources: dict) -> None:
     """_fetch_builtin_jobs should drop jobs whose company is already tracked in companies.json."""
     _seed_companies(aws_resources["companies_table"], "Datadog")
-    _mock_get_pages(
+    _mock_builtin_gets(
         mock_get,
-        _builtin_page_html(
-            [
-                _builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Datadog", "Remote"),
-                _builtin_card_html("SRE", "/job/sre/2", "Some New Startup", "Remote"),
-            ]
-        ),
+        [
+            _builtin_page_html(
+                [
+                    _builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Datadog", "Remote"),
+                    _builtin_card_html("SRE", "/job/sre/2", "Some New Startup", "Remote"),
+                ]
+            )
+        ],
     )
 
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
@@ -555,8 +573,9 @@ def test_fetch_builtin_jobs_skips_known_companies(mock_get, aws_resources: dict)
 def test_fetch_builtin_jobs_skips_known_companies_by_substring(mock_get, aws_resources: dict) -> None:
     """_fetch_builtin_jobs should match tracked companies even with a differing display name."""
     _seed_companies(aws_resources["companies_table"], "CACI International")
-    _mock_get_pages(
-        mock_get, _builtin_page_html([_builtin_card_html("Cloud Engineer", "/job/cloud-engineer/1", "CACI", "Remote")])
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Cloud Engineer", "/job/cloud-engineer/1", "CACI", "Remote")])],
     )
 
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
@@ -572,6 +591,151 @@ def test_fetch_builtin_jobs_request_failure_returns_empty(mock_get, aws_resource
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
 
     assert jobs == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_skips_irrelevant_titles_without_description_fetch(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should never fetch a description for a title that isn't relevant."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Store Associate", "/job/store-associate/1", "Acme", "Remote")])],
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert jobs == []
+    # Every call made should be a paginated search-page call; none should be
+    # a description fetch (those never pass a "page" param).
+    assert all(c.kwargs.get("params", {}).get("page") for c in mock_get.call_args_list)
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_skips_non_matching_location_without_description_fetch(
+    mock_get, aws_resources: dict
+) -> None:
+    """_fetch_builtin_jobs should drop a relevant job whose location doesn't match, without a description fetch."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Hybrid")])],
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert jobs == []
+    assert all(c.kwargs.get("params", {}).get("page") for c in mock_get.call_args_list)
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_keeps_remote_by_default(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should keep a Remote job under the default (location-blank) config."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Remote")])],
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert len(jobs) == 1
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_drops_non_remote_by_default(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should drop a specific-city job under the default (location-blank) config."""
+    _mock_builtin_gets(
+        mock_get,
+        [
+            _builtin_page_html(
+                [_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Reston, VA, USA")]
+            )
+        ],
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert jobs == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_respects_custom_location_env(mock_get, aws_resources: dict, monkeypatch) -> None:
+    """_fetch_builtin_jobs should keep a job in a specific place when BUILTIN_LOCATION is configured."""
+    monkeypatch.setenv("BUILTIN_LOCATION", "Reston, VA")
+    _mock_builtin_gets(
+        mock_get,
+        [
+            _builtin_page_html(
+                [_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Reston, VA, USA")]
+            )
+        ],
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert len(jobs) == 1
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_respects_custom_work_type_env(mock_get, aws_resources: dict, monkeypatch) -> None:
+    """_fetch_builtin_jobs should honor a custom BUILTIN_WORK_TYPE env var."""
+    monkeypatch.setenv("BUILTIN_LOCATION", "")
+    monkeypatch.setenv("BUILTIN_WORK_TYPE", "hybrid")
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Hybrid")])],
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert len(jobs) == 1
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_excludes_high_clearance_description(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should drop a posting whose description requires a high clearance,
+    even when the title itself gives no indication."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Cloud Architect", "/job/cloud-architect/1", "Acme", "Remote")])],
+        description="CLEARANCE TYPE: Top Secret",
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert jobs == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_allows_public_trust_description(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should keep a posting whose description only requires Public Trust."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Cloud Engineer", "/job/cloud-engineer/1", "Acme", "Remote")])],
+        description="Requires a Public Trust clearance.",
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert len(jobs) == 1
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_description_fetch_failure_falls_back_to_title(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should keep a relevant, clean-titled posting even if the detail fetch fails."""
+    page = _builtin_page_html([_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Remote")])
+    responses = [page, _builtin_page_html([])]
+
+    def fake_get(*args, **kwargs):
+        if kwargs.get("params", {}).get("page"):
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status.return_value = None
+            mock_resp.text = responses.pop(0) if len(responses) > 1 else responses[0]
+            return mock_resp
+        raise requests.RequestException("boom")
+
+    mock_get.side_effect = fake_get
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert len(jobs) == 1
 
 
 # --- _filter_relevant_jobs unit tests ---
@@ -691,10 +855,54 @@ def test_filter_drops_non_us_locations(location: str) -> None:
         "Indianapolis, IN",
     ],
 )
-def test_filter_keeps_ambiguous_or_us_locations(location: str) -> None:
-    """_filter_relevant_jobs should keep US and ambiguous (no country signal) locations."""
+def test_filter_keeps_ambiguous_or_us_locations(location: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_filter_relevant_jobs should keep US and ambiguous (no country signal) locations.
+
+    WORK_TYPE=any disables the separate remote/hybrid/office filter so this
+    test isolates the non-US location check specifically.
+    """
+    monkeypatch.setenv("WORK_TYPE", "any")
     result = _filter_relevant_jobs([_job("Platform Engineer", location=location)], "Acme")
     assert len(result) == 1
+
+
+def test_filter_drops_non_remote_jobs_by_default() -> None:
+    """_filter_relevant_jobs should drop a non-Built-In job whose location isn't remote by default."""
+    result = _filter_relevant_jobs([_job("Platform Engineer", location="Arlington, VA")], "Acme")
+    assert result == []
+
+
+def test_filter_keeps_remote_jobs_by_default() -> None:
+    """_filter_relevant_jobs should keep a non-Built-In job whose location is remote."""
+    result = _filter_relevant_jobs([_job("Platform Engineer", location="Remote")], "Acme")
+    assert len(result) == 1
+
+
+def test_filter_exempts_builtin_jobs_from_work_type_check() -> None:
+    """_filter_relevant_jobs should not apply LOCATION/WORK_TYPE to jobs carrying their own "company" key.
+
+    Built In jobs set this key (see _fetch_builtin_jobs) and are already
+    filtered by their own independent BUILTIN_LOCATION/BUILTIN_WORK_TYPE
+    config before reaching here — they shouldn't also be gated by the
+    LOCATION/WORK_TYPE defaults meant for the curated company list.
+    """
+    job = {
+        "title": "Platform Engineer",
+        "url": "https://builtin.com/job/1",
+        "location": "Arlington, VA",
+        "company": "ZS",
+    }
+    result = _filter_relevant_jobs([job], "Built In - AWS Search")
+    assert len(result) == 1
+
+
+def test_filter_respects_custom_work_type_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_filter_relevant_jobs should honor a custom WORK_TYPE for non-Built-In jobs."""
+    monkeypatch.setenv("WORK_TYPE", "hybrid")
+    result = _filter_relevant_jobs([_job("Platform Engineer", location="Hybrid")], "Acme")
+    assert len(result) == 1
+    result = _filter_relevant_jobs([_job("Platform Engineer", location="Remote")], "Acme")
+    assert result == []
 
 
 def test_filter_mixed_batch_keeps_only_matches() -> None:
@@ -820,3 +1028,99 @@ def test_is_non_us_location_false(location: str) -> None:
     "india" respectively.
     """
     assert _is_non_us_location(location) is False
+
+
+# --- _builtin_location_matches unit tests ---
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["Remote", "Remote - USA", "Fully Distributed", "Anywhere in the US"],
+)
+def test_builtin_location_matches_default_remote(location: str) -> None:
+    """_builtin_location_matches should keep remote jobs under the default BUILTIN_WORK_TYPE."""
+    assert _builtin_location_matches(location) is True
+
+
+@pytest.mark.parametrize("location", ["Reston, VA", "Arlington, VA", "Hybrid", "New York, NY", "", "In-Office"])
+def test_builtin_location_matches_default_excludes_non_remote_locations(location: str) -> None:
+    """_builtin_location_matches should drop any non-remote location by default (location match is disabled)."""
+    assert _builtin_location_matches(location) is False
+
+
+def test_builtin_location_matches_custom_location_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_builtin_location_matches should honor a custom BUILTIN_LOCATION."""
+    monkeypatch.setenv("BUILTIN_LOCATION", "Austin, TX")
+    monkeypatch.setenv("BUILTIN_WORK_TYPE", "any")
+    assert _builtin_location_matches("Austin, TX, USA") is True
+
+
+def test_builtin_location_matches_custom_work_type_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_builtin_location_matches should honor a custom BUILTIN_WORK_TYPE."""
+    monkeypatch.setenv("BUILTIN_LOCATION", "")
+    monkeypatch.setenv("BUILTIN_WORK_TYPE", "hybrid")
+    assert _builtin_location_matches("Hybrid") is True
+    assert _builtin_location_matches("Remote") is False
+
+
+def test_builtin_location_matches_work_type_any_matches_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BUILTIN_WORK_TYPE=any should disable the work-type half of the check."""
+    monkeypatch.setenv("BUILTIN_LOCATION", "")
+    monkeypatch.setenv("BUILTIN_WORK_TYPE", "any")
+    assert _builtin_location_matches("Wherever, XY") is True
+
+
+def test_builtin_location_matches_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_builtin_location_matches should match regardless of case."""
+    assert _builtin_location_matches("REMOTE") is True
+
+    monkeypatch.setenv("BUILTIN_LOCATION", "Reston, VA")
+    assert _builtin_location_matches("reston, va") is True
+
+
+def test_builtin_location_matches_any_with_no_location_ignores_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BUILTIN_WORK_TYPE=any with no BUILTIN_LOCATION should disable the check entirely, blank location included."""
+    monkeypatch.setenv("BUILTIN_LOCATION", "")
+    monkeypatch.setenv("BUILTIN_WORK_TYPE", "any")
+    assert _builtin_location_matches("") is True
+
+
+# --- _location_matches unit tests ---
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["Remote", "Remote - USA", "Fully Distributed", "Anywhere in the US"],
+)
+def test_location_matches_default_remote(location: str) -> None:
+    """_location_matches should keep remote jobs under the default WORK_TYPE."""
+    assert _location_matches(location) is True
+
+
+@pytest.mark.parametrize("location", ["Reston, VA", "Arlington, VA", "Hybrid", "New York, NY", "", "In-Office"])
+def test_location_matches_default_excludes_non_remote_locations(location: str) -> None:
+    """_location_matches should drop any non-remote location by default (location match is disabled)."""
+    assert _location_matches(location) is False
+
+
+def test_location_matches_custom_location_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_location_matches should honor a custom LOCATION, independent of BUILTIN_LOCATION."""
+    monkeypatch.setenv("LOCATION", "Reston, VA")
+    monkeypatch.setenv("WORK_TYPE", "any")
+    assert _location_matches("Reston, VA, USA") is True
+
+
+def test_location_matches_custom_work_type_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_location_matches should honor a custom WORK_TYPE, independent of BUILTIN_WORK_TYPE."""
+    monkeypatch.setenv("WORK_TYPE", "hybrid")
+    assert _location_matches("Hybrid") is True
+    assert _location_matches("Remote") is False
+
+
+def test_location_matches_is_independent_of_builtin_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LOCATION/WORK_TYPE and BUILTIN_LOCATION/BUILTIN_WORK_TYPE should be entirely independent settings."""
+    monkeypatch.setenv("BUILTIN_LOCATION", "Reston, VA")
+    monkeypatch.setenv("BUILTIN_WORK_TYPE", "any")
+    # LOCATION/WORK_TYPE are untouched, so _location_matches still uses its own defaults.
+    assert _location_matches("Reston, VA, USA") is False
+    assert _location_matches("Remote") is True
