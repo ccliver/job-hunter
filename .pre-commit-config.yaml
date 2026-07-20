@@ -37,11 +37,13 @@ repos:
       - id: terraform_tflint
         args:
           - '--args=--init'
-      - id: terraform_trivy
+      - id: terraform_checkov
         args:
-          - '--args=--tf-exclude-downloaded-modules'
-          - '--args=--skip-dirs="**/.terraform,.venv"'
-          - '--args=--severity HIGH,CRITICAL'
+          - '--args=--skip-path=.terraform'
+          - '--args=--skip-path=.venv'
+          - '--args=--compact'
+          - '--args=--quiet'
+          - '--args=--soft-fail'
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:

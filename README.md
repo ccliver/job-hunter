@@ -188,4 +188,4 @@ Set these in `terraform/terraform.tfvars` (see `terraform/variables.tf` for the 
 
 ## CI
 
-Pull requests run two jobs: **pre-commit** (ruff, ty, terraform fmt/validate/docs/tflint/trivy) and **Tests** (pytest). All must pass before merge.
+Pull requests run two jobs: **pre-commit** (ruff, ty, terraform fmt/validate/docs/tflint/checkov) and **Tests** (pytest). All must pass before merge.

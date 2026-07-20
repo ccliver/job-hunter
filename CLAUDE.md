@@ -96,7 +96,7 @@ task destroy                     # terraform destroy
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs two jobs on PRs and pushes to main:
-1. **pre-commit** — runs all hooks (`ruff`, `ty`, `terraform_fmt`, `terraform_validate`, `terraform_docs`, `terraform_tflint`, `terraform_trivy`, `check-merge-conflict`, `end-of-file-fixer`). Requires terraform, tflint (v0.55.0), trivy (v0.61.0), and terraform-docs (v0.19.0) installed as separate steps before the pre-commit run.
+1. **pre-commit** — runs all hooks (`ruff`, `ty`, `terraform_fmt`, `terraform_validate`, `terraform_docs`, `terraform_tflint`, `terraform_checkov`, `check-merge-conflict`, `end-of-file-fixer`). Requires terraform, tflint (v0.55.0), checkov (v3.2.526), and terraform-docs (v0.19.0) installed as separate steps before the pre-commit run.
 2. **Tests** — `uv run pytest --tb=short -q`
 
 pytest (`stages: [pre-push]`) is excluded from the pre-commit job since it runs in the dedicated test job.

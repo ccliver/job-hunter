@@ -33,8 +33,10 @@ jobs:
         with:
           tflint_version: v0.55.0
 
-      - name: Install trivy
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.61.0
+      - name: Install checkov
+        run: |
+          uv tool install checkov==3.2.526
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install terraform-docs
         run: |
