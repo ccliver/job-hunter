@@ -36,5 +36,11 @@
   {"company_name": "Northrop Grumman", "careers_url": "https://ngc.wd1.myworkdayjobs.com/Northrop_Grumman_External_Site", "ats": "workday"},
   {"company_name": "Accenture Federal Services", "careers_url": "https://boards-api.greenhouse.io/v1/boards/accenturefederalservices/jobs", "ats": "greenhouse"},
   {"company_name": "Palantir", "careers_url": "https://api.lever.co/v0/postings/palantir", "ats": "lever"},
-  {"company_name": "SAIC", "careers_url": "https://jobs.saic.com/search/jobs", "ats": "unknown"}
+  {"company_name": "SAIC", "careers_url": "https://jobs.saic.com/search/jobs", "ats": "unknown"},
+  {"company_name": "CoStar Group", "careers_url": "https://boards-api.greenhouse.io/v1/boards/costar/jobs", "ats": "greenhouse"},
+  {"company_name": "RTX", "careers_url": "https://globalhr.wd5.myworkdayjobs.com/REC_RTX_Ext_Gateway", "ats": "workday"},
+  {"company_name": "Comscore", "careers_url": "https://comscore.wd5.myworkdayjobs.com/External", "ats": "workday"},
+  {"company_name": "Two Six Technologies", "careers_url": "https://boards-api.greenhouse.io/v1/boards/twosixtechnologies/jobs", "ats": "greenhouse"},
+  {"company_name": "Washington Post", "careers_url": "https://washpost.wd5.myworkdayjobs.com/washingtonpostcareers", "ats": "workday"},
+  {"company_name": "IMF", "careers_url": "https://imf.wd5.myworkdayjobs.com/IMF", "ats": "workday"}
 ]
