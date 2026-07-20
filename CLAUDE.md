@@ -96,7 +96,7 @@ task destroy                     # terraform destroy
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs two jobs on PRs and pushes to main:
-1. **pre-commit** — runs all hooks (`ruff`, `ty`, `terraform_fmt`, `terraform_validate`, `terraform_docs`, `terraform_tflint`, `terraform_checkov`, `check-merge-conflict`, `end-of-file-fixer`). Requires terraform, tflint (v0.55.0), checkov (v3.2.526), and terraform-docs (v0.19.0) installed as separate steps before the pre-commit run.
+1. **pre-commit** — runs all hooks (`ruff`, `ty`, `terraform_fmt`, `terraform_validate`, `terraform_docs`, `terraform_tflint`, `terraform_checkov`, `check-merge-conflict`, `end-of-file-fixer`). Requires terraform, tflint (v0.55.0), checkov (v3.2.526), and terraform-docs (v0.24.0) installed as separate steps before the pre-commit run. The `terraform_docs` hook shells out to whatever `terraform-docs` is on PATH (no bundled/pinned version of its own), so this CI pin must be kept in sync with whatever version is used for local development — a mismatch causes CI to "detect" a diff in `terraform/README.md` that doesn't reproduce locally.
 2. **Tests** — `uv run pytest --tb=short -q`
 
 pytest (`stages: [pre-push]`) is excluded from the pre-commit job since it runs in the dedicated test job.
