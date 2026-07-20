@@ -11,42 +11,10 @@ Beyond ATS-specific scraping, every job is passed through a relevance filter bef
 
 ## Architecture
 
-```
-EventBridge (cron, 09:00 UTC)
-       │
-       ▼
-┌─────────────────┐     scan      ┌──────────────────┐
-│  Orchestrator   │──────────────▶│  DynamoDB        │
-│  Lambda         │               │  companies table │
-└────────┬────────┘               └──────────────────┘
-         │ SendMessage (1 per company)
-         ▼
-┌─────────────────┐     ┌──────────────────┐
-│   SQS Queue     │────▶│  SQS DLQ         │
-└────────┬────────┘     └──────────────────┘
-         │ trigger (batch_size=1)
-         ▼
-┌─────────────────┐
-│  Worker Lambda  │── Greenhouse/Lever/Workday ──▶ JSON API
-│  (container)    │── Built In ──▶ builtin.com search page (HTML)
-│                 │── Custom page ──▶ Playwright + Strands/Bedrock (Claude Haiku)
-└────────┬────────┘
-         │ filter (relevance, clearance, US-only, work-type) + PutItem (deduplicated)
-         ▼
-┌──────────────────┐
-│  DynamoDB        │
-│  jobs table      │
-└──────────────────┘
-         ▲
-         │ Scan (recent jobs)
-┌────────┴────────┐
-│  Notifier       │◀── EventBridge (cron, 09:30 UTC)
-│  Lambda         │
-└────────┬────────┘
-         │ SendEmail (HTML digest, grouped by company)
-         ▼
-       SES → your inbox
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.png">
+  <img src="docs/architecture-light.png" alt="job-hunter architecture: EventBridge triggers the Orchestrator Lambda, which scans the DynamoDB companies table and fans out one SQS message per company (with a DLQ for failures). The Worker Lambda consumes each message, fetching jobs via Greenhouse/Lever/Workday/Built In APIs or a Playwright + Bedrock fallback, filters them, and writes new postings to the DynamoDB jobs table. A second EventBridge schedule triggers the Notifier Lambda, which scans recent jobs and sends an HTML digest via SES.">
+</picture>
 
 ## DynamoDB Tables
 
