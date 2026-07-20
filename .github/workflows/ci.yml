@@ -45,6 +45,22 @@ jobs:
           tar -xzf terraform-docs.tar.gz terraform-docs
           sudo mv terraform-docs /usr/local/bin/
 
+      - name: Build Lambda ZIPs
+        # terraform_validate needs these to exist locally: main.tf hashes them
+        # via filebase64sha256 for source_code_hash, and terraform/.build/ is
+        # gitignored (built on demand by `task build`/`task apply`).
+        run: |
+          for pkg in orchestrator notifier; do
+            rm -rf terraform/.build/$pkg
+            pip3 install --quiet \
+              --platform manylinux2014_x86_64 \
+              --python-version 3.13 \
+              --implementation cp \
+              --only-binary=:all: \
+              --target terraform/.build/$pkg ./src/$pkg
+            (cd terraform/.build/$pkg && zip -qr ../$pkg.zip .)
+          done
+
       - name: Run pre-commit
         run: uv tool run pre-commit run --all-files
 
