@@ -11,6 +11,7 @@ import requests
 from moto import mock_aws
 
 from worker.handler import (
+    _TITLE_KEYWORDS,
     _builtin_location_matches,
     _fetch_builtin_jobs,
     _fetch_greenhouse_jobs,
@@ -144,20 +145,12 @@ def test_handler_passes_ats_to_fetch(mock_fetch, aws_resources: dict, lambda_con
 @patch("worker.handler.requests.get")
 @patch("worker.handler.requests.post")
 def test_handler_writes_workday_jobs_across_pages(mock_post, mock_get, aws_resources: dict, lambda_context) -> None:
-    """handler() should paginate the Workday API and persist all matching jobs to DynamoDB."""
+    """handler() should paginate a Workday keyword search and persist all matching jobs to DynamoDB."""
     page1_postings = [_workday_posting("Store Associate", f"R{i}") for i in range(19)]
     page1_postings.append(_workday_posting("Platform Engineer", "R001"))
     page1 = _workday_page(page1_postings, total=21)
     page2 = _workday_page([_workday_posting("Store Associate", "R999")], total=21)
-    responses = [page1, page2]
-
-    def fake_post(*args, **kwargs):
-        mock_resp = MagicMock()
-        mock_resp.json.side_effect = lambda: responses.pop(0)
-        mock_resp.raise_for_status.return_value = None
-        return mock_resp
-
-    mock_post.side_effect = fake_post
+    _mock_workday_search(mock_post, {"platform": [page1, page2]})
     mock_get.return_value.json.return_value = _workday_job_detail("No clearance required.")
     mock_get.return_value.raise_for_status.return_value = None
 
@@ -165,9 +158,10 @@ def test_handler_writes_workday_jobs_across_pages(mock_post, mock_get, aws_resou
         _sqs_event("Acme", "https://acme.wd1.myworkdayjobs.com/acme-careers", ats="workday"), lambda_context
     )
 
-    assert mock_post.call_count == 2
+    platform_calls = [c for c in mock_post.call_args_list if c.kwargs["json"]["searchText"] == "platform"]
+    assert len(platform_calls) == 2
     # Only the one relevant-titled posting ("Platform Engineer") triggers a description fetch;
-    # the 20 "Store Associate" postings are dropped by the title pre-filter first.
+    # the "Store Associate" postings are dropped by the title pre-filter first.
     assert mock_get.call_count == 1
     assert result["jobs_written"] == 1
     items = aws_resources["table"].scan()["Items"]
@@ -327,12 +321,34 @@ def _workday_job_detail(description: str) -> dict:
     return {"jobPostingInfo": {"jobDescription": description}}
 
 
+def _mock_workday_search(mock_post, keyword_pages: dict) -> None:
+    """Wire mock_post.side_effect to return keyword-specific paginated pages.
+
+    keyword_pages maps a searchText keyword to a list of page dicts (as
+    produced by _workday_page); any keyword not in the map — i.e. every
+    _TITLE_KEYWORDS entry not under test — gets an empty (0-total) page on
+    its first call, matching a real "no results for this search" response.
+    """
+    cursors = {kw: list(pages) for kw, pages in keyword_pages.items()}
+
+    def fake_post(*args, **kwargs):
+        keyword = kwargs["json"]["searchText"]
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        pages = cursors.get(keyword)
+        mock_resp.json.return_value = pages.pop(0) if pages else _workday_page([], total=0)
+        return mock_resp
+
+    mock_post.side_effect = fake_post
+
+
 @patch("worker.handler.requests.get")
 @patch("worker.handler.requests.post")
 def test_fetch_workday_jobs_single_page(mock_post, mock_get) -> None:
     """_fetch_workday_jobs should normalise postings from a single page of results."""
-    mock_post.return_value.json.return_value = _workday_page([_workday_posting("Platform Engineer", "R001")], total=1)
-    mock_post.return_value.raise_for_status = lambda: None
+    _mock_workday_search(
+        mock_post, {"platform": [_workday_page([_workday_posting("Platform Engineer", "R001")], total=1)]}
+    )
     mock_get.return_value.json.return_value = _workday_job_detail("No clearance required.")
     mock_get.return_value.raise_for_status.return_value = None
 
@@ -345,10 +361,12 @@ def test_fetch_workday_jobs_single_page(mock_post, mock_get) -> None:
             "location": "Remote",
         }
     ]
-    called_url = mock_post.call_args.args[0]
-    assert called_url == "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/acme-careers/jobs"
-    assert mock_post.call_args.kwargs["json"] == {"limit": 20, "offset": 0, "searchText": ""}
-    assert mock_post.call_args.kwargs["headers"] == {"Content-Type": "application/json"}
+    # One search call per _TITLE_KEYWORDS entry.
+    assert mock_post.call_count == len(_TITLE_KEYWORDS)
+    platform_call = next(c for c in mock_post.call_args_list if c.kwargs["json"]["searchText"] == "platform")
+    assert platform_call.args[0] == "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/acme-careers/jobs"
+    assert platform_call.kwargs["json"] == {"limit": 20, "offset": 0, "searchText": "platform"}
+    assert platform_call.kwargs["headers"] == {"Content-Type": "application/json"}
     assert mock_get.call_args.args[0] == (
         "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/acme-careers/job/Remote/Platform-Engineer_R001"
     )
@@ -357,29 +375,42 @@ def test_fetch_workday_jobs_single_page(mock_post, mock_get) -> None:
 @patch("worker.handler.requests.get")
 @patch("worker.handler.requests.post")
 def test_fetch_workday_jobs_paginates_across_pages(mock_post, mock_get) -> None:
-    """_fetch_workday_jobs should keep requesting pages until all postings are collected."""
+    """_fetch_workday_jobs should keep requesting pages for a keyword until all its postings are collected."""
     page1 = _workday_page([_workday_posting(f"Platform Engineer {i}", f"R00{i}") for i in range(20)], total=25)
     page2 = _workday_page([_workday_posting(f"Platform Engineer {i}", f"R00{i}") for i in range(20, 25)], total=25)
-
-    responses = [page1, page2]
-
-    def fake_post(*args, **kwargs):
-        mock_resp = MagicMock()
-        mock_resp.json.side_effect = lambda: responses.pop(0)
-        mock_resp.raise_for_status.return_value = None
-        return mock_resp
-
-    mock_post.side_effect = fake_post
+    _mock_workday_search(mock_post, {"platform": [page1, page2]})
     mock_get.return_value.json.return_value = _workday_job_detail("No clearance required.")
     mock_get.return_value.raise_for_status.return_value = None
 
     jobs = _fetch_workday_jobs("https://acme.wd1.myworkdayjobs.com/acme-careers")
 
     assert len(jobs) == 25
-    assert mock_post.call_count == 2
-    offsets = [call.kwargs["json"]["offset"] for call in mock_post.call_args_list]
+    platform_calls = [c for c in mock_post.call_args_list if c.kwargs["json"]["searchText"] == "platform"]
+    offsets = [c.kwargs["json"]["offset"] for c in platform_calls]
     assert offsets == [0, 20]
     assert mock_get.call_count == 25
+
+
+@patch("worker.handler.requests.get")
+@patch("worker.handler.requests.post")
+def test_fetch_workday_jobs_dedupes_posting_seen_under_multiple_keywords(mock_post, mock_get) -> None:
+    """A posting matching more than one keyword search should only be processed (and its
+    description fetched) once, not once per matching keyword."""
+    posting = _workday_posting("Senior DevOps Platform Engineer", "R001")
+    _mock_workday_search(
+        mock_post,
+        {
+            "platform": [_workday_page([posting], total=1)],
+            "devops": [_workday_page([posting], total=1)],
+        },
+    )
+    mock_get.return_value.json.return_value = _workday_job_detail("No clearance required.")
+    mock_get.return_value.raise_for_status.return_value = None
+
+    jobs = _fetch_workday_jobs("https://acme.wd1.myworkdayjobs.com/acme-careers")
+
+    assert len(jobs) == 1
+    assert mock_get.call_count == 1
 
 
 def test_fetch_workday_jobs_non_workday_url_returns_empty() -> None:

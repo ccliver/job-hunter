@@ -63,7 +63,7 @@ _PAGE_CHAR_LIMIT = 15_000
 
 _WORKDAY_URL_RE = re.compile(r"^https://([^./]+)\.(wd\d+)\.myworkdayjobs\.com/([^/?#]+)")
 _WORKDAY_PAGE_SIZE = 20
-_WORKDAY_MAX_JOBS = 500
+_WORKDAY_MAX_JOBS_PER_KEYWORD = 1000
 
 _BUILTIN_BASE_URL = "https://builtin.com"
 _BUILTIN_MAX_PAGES = 15
@@ -506,14 +506,24 @@ def _fetch_workday_job_description(tenant: str, wd: str, site: str, external_pat
 def _fetch_workday_jobs(careers_url: str) -> list[dict[str, str]]:
     """Fetch job listings from a Workday-hosted careers site via its unofficial JSON API.
 
-    Parses the tenant/site from a myworkdayjobs.com careers URL and paginates
-    the `cxs` search endpoint (there's no public documentation for this API;
-    every Workday tenant exposes it under the same path convention). The
-    search endpoint doesn't return full descriptions, so for postings whose
-    title already looks relevant (_title_looks_relevant), a follow-up request
-    fetches the full description to catch clearance requirements that aren't
-    mentioned in the title (this endpoint is checked, not the search one, to
-    avoid an extra request per posting for the hundreds of irrelevant ones).
+    Parses the tenant/site from a myworkdayjobs.com careers URL, then issues
+    one paginated search per _TITLE_KEYWORDS entry (via the `searchText`
+    param) instead of paginating the company's entire board unfiltered.
+    Company board sizes vary enormously — a few hundred postings for a
+    startup vs. 17,000+ for a national retail chain with a posting per store
+    — but Workday's search narrows results server-side, so the keyword-
+    scoped subset stays a manageable size regardless of company size (e.g.
+    empirically, CVS's ~17,700 total postings narrow to under 300 for any
+    single one of these keywords). Workday's search is a fuzzy full-text
+    match, not an exact substring one (e.g. searching "platform" surfaces
+    unrelated titles too), so every result is still re-checked with the
+    exact _title_looks_relevant filter before being kept — this only saves
+    us from scanning thousands of irrelevant postings to find the relevant
+    ones. The same posting can surface under multiple keywords, so seen_paths
+    dedupes across searches to avoid double-processing (and double-fetching
+    descriptions for) the same posting. For postings whose title already
+    looks relevant, a follow-up request fetches the full description to
+    catch clearance requirements that aren't mentioned in the title.
 
     Args:
         careers_url: Careers URL of the form
@@ -532,50 +542,56 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, str]]:
 
     jobs = []
     clearance_skipped = 0
-    offset = 0
-    while offset < _WORKDAY_MAX_JOBS:
-        try:
-            resp = requests.post(
-                api_url,
-                json={"limit": _WORKDAY_PAGE_SIZE, "offset": offset, "searchText": ""},
-                headers={"Content-Type": "application/json"},
-                timeout=30,
-            )
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            logger.warning("Workday fetch failed", url=api_url, error=str(exc))
-            return []
+    seen_paths: set[str] = set()
 
-        try:
-            data = resp.json()
-        except requests.exceptions.JSONDecodeError:
-            logger.warning("Workday response is not JSON", url=api_url)
-            return []
+    for keyword in _TITLE_KEYWORDS:
+        offset = 0
+        while offset < _WORKDAY_MAX_JOBS_PER_KEYWORD:
+            try:
+                resp = requests.post(
+                    api_url,
+                    json={"limit": _WORKDAY_PAGE_SIZE, "offset": offset, "searchText": keyword},
+                    headers={"Content-Type": "application/json"},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                logger.warning("Workday fetch failed", url=api_url, keyword=keyword, error=str(exc))
+                break
 
-        postings = data.get("jobPostings", [])
-        if not postings:
-            break
+            try:
+                data = resp.json()
+            except requests.exceptions.JSONDecodeError:
+                logger.warning("Workday response is not JSON", url=api_url, keyword=keyword)
+                break
 
-        for posting in postings:
-            title = posting.get("title", "")
-            if not _title_looks_relevant(title):
-                continue
-            external_path = posting.get("externalPath", "")
-            description = _fetch_workday_job_description(tenant, wd, site, external_path)
-            if _requires_excluded_clearance(f"{title} {description}"):
-                clearance_skipped += 1
-                continue
-            jobs.append(
-                {
-                    "title": title,
-                    "url": base_url + external_path,
-                    "location": posting.get("locationsText", ""),
-                }
-            )
+            postings = data.get("jobPostings", [])
+            if not postings:
+                break
 
-        offset += _WORKDAY_PAGE_SIZE
-        if offset >= data.get("total", 0):
-            break
+            for posting in postings:
+                external_path = posting.get("externalPath", "")
+                if external_path in seen_paths:
+                    continue
+                title = posting.get("title", "")
+                if not _title_looks_relevant(title):
+                    continue
+                seen_paths.add(external_path)
+                description = _fetch_workday_job_description(tenant, wd, site, external_path)
+                if _requires_excluded_clearance(f"{title} {description}"):
+                    clearance_skipped += 1
+                    continue
+                jobs.append(
+                    {
+                        "title": title,
+                        "url": base_url + external_path,
+                        "location": posting.get("locationsText", ""),
+                    }
+                )
+
+            offset += _WORKDAY_PAGE_SIZE
+            if offset >= data.get("total", 0):
+                break
 
     logger.info("Workday jobs fetched", url=careers_url, count=len(jobs), clearance_skipped=clearance_skipped)
     return jobs
