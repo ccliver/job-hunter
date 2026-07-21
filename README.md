@@ -2,10 +2,9 @@
 
 Automated job board monitor. An EventBridge cron fans out one Lambda per company to scrape careers pages, deduplicates results in DynamoDB, and emails a daily digest via SES.
 
-The worker supports five scraping backends:
-- **Greenhouse / Lever / Workday** — direct JSON API calls, no LLM needed
-- **Built In** — scrapes a Built In (builtin.com) search results page (server-rendered HTML, no LLM); since it aggregates postings across many employers, each job carries its own company name and postings from companies already tracked directly elsewhere in `companies.json` are skipped
-- **Custom careers pages** — headless Chromium (Playwright) renders the page, then a Strands/Bedrock agent (Claude Haiku) extracts structured listings
+The worker supports four scraping backends:
+- **Greenhouse / Lever / Workday** — direct JSON API calls
+- **Built In** — scrapes a Built In (builtin.com) search results page (server-rendered HTML); since it aggregates postings across many employers, each job carries its own company name and postings from companies already tracked directly elsewhere in `companies.json` are skipped
 
 Beyond ATS-specific scraping, every job is passed through a relevance filter before being written to DynamoDB: it must match a target-role keyword (platform/SRE/DevOps/cloud/infrastructure/staff engineer), must not look like a management role, must not require a security clearance above Public Trust, must not be a non-US posting, and must match a configurable location/work-type preference (defaults to remote-only — see [Configuration](#configuration)). See `worker/handler.py:_filter_relevant_jobs`.
 
@@ -13,7 +12,7 @@ Beyond ATS-specific scraping, every job is passed through a relevance filter bef
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.png">
-  <img src="docs/architecture-light.png" alt="job-hunter architecture: EventBridge triggers the Orchestrator Lambda, which scans the DynamoDB companies table and fans out one SQS message per company (with a DLQ for failures). The Worker Lambda consumes each message, fetching jobs via Greenhouse/Lever/Workday/Built In APIs or a Playwright + Bedrock fallback, filters them, and writes new postings to the DynamoDB jobs table. A second EventBridge schedule triggers the Notifier Lambda, which scans recent jobs and sends an HTML digest via SES.">
+  <img src="docs/architecture-light.png" alt="job-hunter architecture: EventBridge triggers the Orchestrator Lambda, which scans the DynamoDB companies table and fans out one SQS message per company (with a DLQ for failures). The Worker Lambda consumes each message, fetching jobs via Greenhouse/Lever/Workday/Built In APIs, filters them, and writes new postings to the DynamoDB jobs table. A second EventBridge schedule triggers the Notifier Lambda, which scans recent jobs and sends an HTML digest via SES.">
 </picture>
 
 ## DynamoDB Tables
@@ -23,7 +22,7 @@ Beyond ATS-specific scraping, every job is passed through a relevance filter bef
 |-------------|------|---------------|
 | company_name | S    | Partition key |
 | careers_url  | S    | Careers page URL |
-| ats          | S    | ATS backend (`greenhouse`, `lever`, `workday`, `builtin`, or `unknown`) |
+| ats          | S    | ATS backend (`greenhouse`, `lever`, `workday`, or `builtin`) |
 
 ### `job-hunter-jobs`
 | Attribute     | Type | Role          |
@@ -57,7 +56,7 @@ job-hunter/
 │   │   └── tests/
 │   │       └── test_handler.py
 │   ├── worker/
-│   │   ├── Dockerfile          # container image Lambda (Playwright + Chromium)
+│   │   ├── Dockerfile          # container image Lambda
 │   │   ├── pyproject.toml
 │   │   ├── worker/
 │   │   │   └── handler.py
@@ -122,10 +121,7 @@ ses_from_address = "you@yourdomain.com"
 ses_to_address   = "you@yourdomain.com"
 EOF
 
-# 3. Enable Claude Haiku model access in the AWS Bedrock console
-#    (us-east-1 → Model access → Anthropic Claude Haiku)
-
-# 4. Deploy
+# 3. Deploy
 task apply    # terraform init + apply (creates ECR, builds & pushes worker image, then full apply)
 ```
 
@@ -163,12 +159,11 @@ Edit `companies/companies.json` and run:
 task seed
 ```
 
-Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lever`, `workday`, `builtin`, or `unknown`):
+Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lever`, `workday`, or `builtin`):
 
 ```json
 [
-  {"company_name": "Acme Corp", "careers_url": "https://boards-api.greenhouse.io/v1/boards/acme/jobs", "ats": "greenhouse"},
-  {"company_name": "Example Inc", "careers_url": "https://example.com/careers", "ats": "unknown"}
+  {"company_name": "Acme Corp", "careers_url": "https://boards-api.greenhouse.io/v1/boards/acme/jobs", "ats": "greenhouse"}
 ]
 ```
 
@@ -178,7 +173,6 @@ Set these in `terraform/terraform.tfvars` (see `terraform/variables.tf` for the 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `bedrock_model_id` | Claude Haiku (cross-region inference profile) | Model used by the `unknown`-ATS scraping agent |
 | `location` | `""` (disabled) | Location substring to additionally keep, for every backend except `builtin` |
 | `work_type` | `"remote"` | Work-type keyword to keep (`remote`, `hybrid`, `office`, `any`, or any literal substring), for every backend except `builtin` |
 | `builtin_location` | `""` (disabled) | Same as `location`, but for the `builtin` backend only — independent setting |

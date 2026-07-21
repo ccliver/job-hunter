@@ -81,19 +81,6 @@ resource "aws_iam_role_policy" "worker" {
         Resource = aws_sqs_queue.worker.arn
       },
       {
-        Sid    = "BedrockInvoke"
-        Effect = "Allow"
-        Action = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-        # TODO: scope to specific model ARN once account/region are known
-        Resource = "*"
-      },
-      {
-        Sid      = "MarketplaceSubscribe"
-        Effect   = "Allow"
-        Action   = ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"]
-        Resource = "*"
-      },
-      {
         Sid      = "ECRPullImage"
         Effect   = "Allow"
         Action   = ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"]
@@ -188,8 +175,6 @@ resource "aws_lambda_function" "worker" {
     variables = {
       JOBS_TABLE        = aws_dynamodb_table.jobs.name
       COMPANIES_TABLE   = aws_dynamodb_table.companies.name
-      BEDROCK_REGION    = var.aws_region
-      BEDROCK_MODEL     = var.bedrock_model_id
       BUILTIN_LOCATION  = var.builtin_location
       BUILTIN_WORK_TYPE = var.builtin_work_type
       LOCATION          = var.location

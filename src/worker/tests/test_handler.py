@@ -61,8 +61,6 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
 
         monkeypatch.setenv("JOBS_TABLE", "test-jobs")
         monkeypatch.setenv("COMPANIES_TABLE", "test-companies")
-        monkeypatch.setenv("BEDROCK_REGION", REGION)
-        monkeypatch.setenv("BEDROCK_MODEL", "anthropic.claude-haiku-4-5-20251001-v1:0")
 
         yield {"table": table, "companies_table": companies_table}
 
@@ -198,6 +196,12 @@ def test_handler_defaults_ats_to_unknown(mock_fetch, aws_resources: dict, lambda
     mock_fetch.assert_called_once_with("Acme", "https://acme.com/jobs", "unknown")
 
 
+def test_fetch_jobs_returns_empty_for_unrecognised_ats() -> None:
+    """_fetch_jobs should return no jobs (not raise) for an unrecognised ats value."""
+    assert _fetch_jobs("Acme", "https://acme.com/jobs", "unknown") == []
+    assert _fetch_jobs("Acme", "https://acme.com/jobs", "some-other-ats") == []
+
+
 # --- _fetch_jobs dispatch unit tests ---
 
 
@@ -217,14 +221,6 @@ def test_fetch_jobs_dispatches_lever(mock_lv) -> None:
     mock_lv.assert_called_once_with("https://jobs.lever.co/acme")
 
 
-@patch("worker.handler._fetch_default_jobs")
-def test_fetch_jobs_dispatches_unknown(mock_def) -> None:
-    """_fetch_jobs should call _fetch_default_jobs for ats='unknown'."""
-    mock_def.return_value = []
-    _fetch_jobs("Acme", "https://acme.com/jobs", "unknown")
-    mock_def.assert_called_once_with("Acme", "https://acme.com/jobs")
-
-
 @patch("worker.handler._fetch_workday_jobs")
 def test_fetch_jobs_dispatches_workday(mock_wd) -> None:
     """_fetch_jobs should call _fetch_workday_jobs for ats='workday'."""
@@ -239,14 +235,6 @@ def test_fetch_jobs_dispatches_builtin(mock_bi) -> None:
     mock_bi.return_value = []
     _fetch_jobs("Built In - AWS Search", "https://builtin.com/jobs?search=AWS", "builtin")
     mock_bi.assert_called_once_with("https://builtin.com/jobs?search=AWS")
-
-
-@patch("worker.handler._fetch_default_jobs")
-def test_fetch_jobs_dispatches_unrecognised_ats(mock_def) -> None:
-    """_fetch_jobs should fall back to the default handler for unknown ATS values."""
-    mock_def.return_value = []
-    _fetch_jobs("Acme", "https://acme.com/jobs", "some-other-ats")
-    mock_def.assert_called_once_with("Acme", "https://acme.com/jobs")
 
 
 # --- _fetch_greenhouse_jobs unit tests ---
@@ -488,11 +476,20 @@ def test_fetch_workday_jobs_description_fetch_failure_falls_back_to_title(mock_p
 # --- _fetch_builtin_jobs unit tests ---
 
 
-def _builtin_card_html(title: str, href: str, company: str, location: str) -> str:
+def _builtin_card_html(title: str, href: str, company: str, location: str, workplace: str = "") -> str:
+    """Build a Built In job card fixture. Built In renders geography (`location`,
+    e.g. "USA") and work model (`workplace`, e.g. "Remote") as two separate
+    badges — see _fetch_builtin_jobs for why that split matters."""
     return f"""
     <div data-id="job-card">
         <a data-id="company-title"><span>{company}</span></a>
         <a href="{href}" data-id="job-card-title">{title}</a>
+        <div class="d-flex align-items-start gap-sm">
+            <div class="d-flex justify-content-center align-items-center h-lg min-w-md">
+                <i class="fa-regular fa-house-building fs-xs text-pretty-blue"></i>
+            </div>
+            <div><span class="font-barlow text-gray-04">{workplace}</span></div>
+        </div>
         <div class="d-flex align-items-start gap-sm">
             <div class="d-flex justify-content-center align-items-center h-lg min-w-md">
                 <i class="fa-regular fa-location-dot fs-xs text-pretty-blue"></i>
@@ -662,6 +659,30 @@ def test_fetch_builtin_jobs_keeps_remote_by_default(mock_get, aws_resources: dic
     _mock_builtin_gets(
         mock_get,
         [_builtin_page_html([_builtin_card_html("Platform Engineer", "/job/platform-engineer/1", "Acme", "Remote")])],
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert len(jobs) == 1
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_keeps_remote_shown_via_separate_workplace_badge(mock_get, aws_resources: dict) -> None:
+    """A card whose geography badge says "USA" (not "remote") but whose separate
+    work-model badge says "Remote" must still be kept under the default config.
+    Regression test: Built In renders these as two independent badges, and the
+    geography text alone rarely contains "remote" even for fully-remote roles."""
+    _mock_builtin_gets(
+        mock_get,
+        [
+            _builtin_page_html(
+                [
+                    _builtin_card_html(
+                        "Staff Engineer (Platform)", "/job/staff-engineer-platform/1", "Acme", "USA", "Remote"
+                    )
+                ]
+            )
+        ],
     )
 
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")

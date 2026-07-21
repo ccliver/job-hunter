@@ -52,7 +52,6 @@ No modules.
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_aws_region"></a> [aws\_region](#input\_aws\_region) | AWS region to deploy resources into | `string` | `"us-east-1"` | no |
-| <a name="input_bedrock_model_id"></a> [bedrock\_model\_id](#input\_bedrock\_model\_id) | Bedrock model ID used by the Worker agent | `string` | `"us.anthropic.claude-haiku-4-5-20251001-v1:0"` | no |
 | <a name="input_builtin_location"></a> [builtin\_location](#input\_builtin\_location) | Location substring to additionally keep for the Built In (builtin.com) ATS backend; blank disables it (remote-only) | `string` | `""` | no |
 | <a name="input_builtin_work_type"></a> [builtin\_work\_type](#input\_builtin\_work\_type) | Work-type keyword to keep for the Built In ATS backend (remote, hybrid, office, any, or any literal substring) | `string` | `"remote"` | no |
 | <a name="input_lambda_memory_mb"></a> [lambda\_memory\_mb](#input\_lambda\_memory\_mb) | Lambda function memory in MB (orchestrator and notifier) | `number` | `512` | no |
@@ -64,7 +63,7 @@ No modules.
 | <a name="input_ses_from_address"></a> [ses\_from\_address](#input\_ses\_from\_address) | Verified SES sender email address | `string` | n/a | yes |
 | <a name="input_ses_to_address"></a> [ses\_to\_address](#input\_ses\_to\_address) | Recipient email address for job digests | `string` | n/a | yes |
 | <a name="input_work_type"></a> [work\_type](#input\_work\_type) | Work-type keyword to keep for every ATS backend except builtin (remote, hybrid, office, any, or any literal substring). Independent of builtin\_work\_type | `string` | `"remote"` | no |
-| <a name="input_worker_memory_mb"></a> [worker\_memory\_mb](#input\_worker\_memory\_mb) | Worker Lambda memory in MB — needs extra headroom for Chromium | `number` | `1024` | no |
+| <a name="input_worker_memory_mb"></a> [worker\_memory\_mb](#input\_worker\_memory\_mb) | Worker Lambda memory in MB | `number` | `512` | no |
 
 ## Outputs
 

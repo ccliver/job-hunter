@@ -7,22 +7,19 @@ the DynamoDB `jobs` table. Deduplication is achieved by hashing
 company+title+url as the DynamoDB partition key (job_id).
 
 ATS backends:
-    greenhouse - JSON API; no LLM required
-    lever      - JSON API; no LLM required
-    workday    - Unofficial JSON API (cxs); no LLM required
-    builtin    - Built In (builtin.com) search results page; no LLM required.
-                 Aggregates postings across many employers, so each returned
-                 job carries its own "company" key instead of relying on the
-                 SQS message's company_name. Jobs from companies already
-                 tracked directly elsewhere in companies.json are skipped.
-    unknown    - Custom careers page; uses Strands/Bedrock (Claude Haiku)
+    greenhouse - JSON API
+    lever      - JSON API
+    workday    - Unofficial JSON API (cxs)
+    builtin    - Built In (builtin.com) search results page. Aggregates
+                 postings across many employers, so each returned job carries
+                 its own "company" key instead of relying on the SQS
+                 message's company_name. Jobs from companies already tracked
+                 directly elsewhere in companies.json are skipped.
 
 Environment variables expected:
     JOBS_TABLE      - DynamoDB table name for job postings
     COMPANIES_TABLE - DynamoDB table name for tracked companies (used by the
                        builtin ATS backend to skip already-tracked companies)
-    BEDROCK_REGION  - AWS region for Bedrock (defaults to us-east-1)
-    BEDROCK_MODEL   - Bedrock model ID (defaults to Claude Haiku cross-region inference profile)
     LOCATION          - Location substring to additionally keep for every ATS
                          backend except builtin (defaults to "" — disabled,
                          i.e. remote-only)
@@ -49,17 +46,10 @@ import requests
 from aws_lambda_powertools import Logger
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-from playwright.sync_api import sync_playwright
-from strands import Agent
-from strands.models import BedrockModel
 
 logger = Logger(service="worker")
 
 dynamodb = boto3.resource("dynamodb")
-
-_DEFAULT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-_DEFAULT_REGION = "us-east-1"
-_PAGE_CHAR_LIMIT = 15_000
 
 _WORKDAY_URL_RE = re.compile(r"^https://([^./]+)\.(wd\d+)\.myworkdayjobs\.com/([^/?#]+)")
 _WORKDAY_PAGE_SIZE = 20
@@ -710,8 +700,9 @@ def _fetch_builtin_job_description(url: str) -> str:
 def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, str]]:
     """Fetch job listings from a Built In (builtin.com) search results page.
 
-    The search page is server-rendered — no Playwright/JS execution needed.
-    Paginates via the `page` query param until a page returns no job cards.
+    The search page is server-rendered, so a plain GET is enough — no
+    headless browser needed. Paginates via the `page` query param until a
+    page returns no job cards.
     Built In aggregates postings across many employers, so each job dict
     carries its own "company" key; jobs from companies already tracked
     directly elsewhere in companies.json are skipped (they're covered, often
@@ -766,7 +757,15 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, str]]:
             title = title_el.get_text(strip=True)
             if not _title_looks_relevant(title):
                 continue
-            location = _builtin_card_text_by_icon(card, "fa-location-dot")
+            geo = _builtin_card_text_by_icon(card, "fa-location-dot")
+            workplace = _builtin_card_text_by_icon(card, "fa-house-building")
+            # Built In shows these as two separate badges — geography (e.g.
+            # "USA") and work model (e.g. "Remote") — verified directly:
+            # every card checked had both, and the geography badge alone
+            # rarely contains "remote" even for fully-remote roles, which
+            # silently excluded about half of genuinely-remote postings
+            # under the work-type filter before this was combined.
+            location = f"{geo} ({workplace})" if geo and workplace else geo or workplace
             if not _builtin_location_matches(location):
                 location_skipped += 1
                 continue
@@ -795,107 +794,18 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, str]]:
     return jobs
 
 
-def _fetch_default_jobs(company_name: str, careers_url: str) -> list[dict[str, str]]:
-    """Fetch job listings from a custom careers page using Playwright and Strands/Bedrock.
-
-    Renders the page with a headless Chromium browser (handles JS-rendered
-    content), strips noise with BeautifulSoup, then asks a Bedrock-backed
-    agent to extract structured job listings.
-
-    Args:
-        company_name: Used in the prompt for context.
-        careers_url: URL of the custom careers page to scrape.
-
-    Returns:
-        Normalised list of job dicts with title, url, location keys.
-    """
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--no-zygote",  # prevents forking a zygote process (required in Lambda)
-                    "--single-process",  # runs renderer in the browser process (required in Lambda)
-                ],
-            )
-            page = browser.new_page()
-            page.goto(careers_url, wait_until="networkidle", timeout=30_000)
-            html = page.content()
-            browser.close()
-    except Exception as exc:
-        logger.warning("Playwright fetch failed", url=careers_url, error=str(exc))
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
-        tag.decompose()
-    page_text = soup.get_text(separator="\n", strip=True)[:_PAGE_CHAR_LIMIT]
-
-    model = BedrockModel(
-        model_id=os.environ.get("BEDROCK_MODEL", _DEFAULT_MODEL),
-        region_name=os.environ.get("BEDROCK_REGION", _DEFAULT_REGION),
-    )
-    agent = Agent(model=model)
-
-    prompt = (
-        "You are a job listing extractor. Extract job listings from the provided page content.\n"
-        "Rules:\n"
-        "1. Only return URLs that appear verbatim in the page content. Never construct, infer, or modify URLs.\n"
-        "2. If you cannot find a complete, valid URL for a job listing, omit that job entirely.\n"
-        "3. Return only jobs relevant to platform engineering, SRE, DevOps, cloud, or infrastructure roles.\n"
-        "4. Omit any job that requires a security clearance above Public Trust (e.g. Secret, Top Secret, "
-        "TS/SCI, polygraph). Jobs requiring only a Public Trust clearance, or no clearance at all, are fine "
-        "to include.\n"
-        "5. Return results as a JSON array with fields: title, url, location.\n"
-        "6. If no relevant jobs are found, return an empty array.\n\n"
-        f"Page content:\n{page_text}"
-    )
-
-    response = agent(prompt)
-    raw = str(response)
-
-    try:
-        match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if not match:
-            logger.warning("No JSON array found in agent response", company=company_name)
-            return []
-        jobs: list[Any] = json.loads(match.group())
-        result = [j for j in jobs if isinstance(j, dict) and j.get("title") and j.get("url")]
-    except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse agent response as JSON", error=str(exc), company=company_name)
-        return []
-
-    # Drop any job whose URL doesn't appear verbatim in the fetched page text.
-    # The LLM will hallucinate plausible-looking URLs despite prompt instructions;
-    # this is the only reliable guard against that.
-    verified = [j for j in result if j["url"] in page_text]
-    if len(verified) < len(result):
-        logger.warning(
-            "Dropped jobs with hallucinated URLs",
-            company=company_name,
-            dropped=len(result) - len(verified),
-            kept=len(verified),
-        )
-
-    logger.info("Default (LLM) jobs fetched", company=company_name, url=careers_url, count=len(verified))
-    return verified
-
-
 def _fetch_jobs(company_name: str, careers_url: str, ats: str) -> list[dict[str, str]]:
     """Dispatch to the appropriate ATS handler and return normalised job dicts.
 
     Args:
-        company_name: Used for logging and LLM prompt context.
+        company_name: Unused; kept for a uniform call signature across backends.
         careers_url: URL passed to the ATS handler.
-        ats: ATS backend identifier ("greenhouse", "lever", "workday", "builtin", or "unknown").
+        ats: ATS backend identifier ("greenhouse", "lever", "workday", or "builtin").
 
     Returns:
         Normalised list of job dicts with title, url, location keys (plus a
         "company" key for the "builtin" backend, which aggregates postings
-        across many employers).
+        across many employers). Unrecognised ats values yield no jobs.
     """
     if ats == "greenhouse":
         return _fetch_greenhouse_jobs(careers_url)
@@ -905,7 +815,8 @@ def _fetch_jobs(company_name: str, careers_url: str, ats: str) -> list[dict[str,
         return _fetch_workday_jobs(careers_url)
     if ats == "builtin":
         return _fetch_builtin_jobs(careers_url)
-    return _fetch_default_jobs(company_name, careers_url)
+    logger.warning("Unrecognised ATS backend", company=company_name, ats=ats)
+    return []
 
 
 @logger.inject_lambda_context

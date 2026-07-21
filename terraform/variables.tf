@@ -32,12 +32,6 @@ variable "lookback_minutes" {
   default     = 60
 }
 
-variable "bedrock_model_id" {
-  description = "Bedrock model ID used by the Worker agent"
-  type        = string
-  default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-}
-
 variable "builtin_location" {
   description = "Location substring to additionally keep for the Built In (builtin.com) ATS backend; blank disables it (remote-only)"
   type        = string
@@ -75,7 +69,7 @@ variable "lambda_memory_mb" {
 }
 
 variable "worker_memory_mb" {
-  description = "Worker Lambda memory in MB — needs extra headroom for Chromium"
+  description = "Worker Lambda memory in MB"
   type        = number
-  default     = 1024
+  default     = 512
 }
