@@ -87,17 +87,6 @@ _WORK_TYPE_KEYWORDS = {
     "office": ["in-office", "in office", "on-site", "onsite"],
 }
 
-# Roles the agent is instructed to extract (used in prompt and post-filter).
-_TARGET_ROLES = [
-    "Platform Engineer",
-    "Site Reliability Engineer",
-    "SRE",
-    "DevOps Engineer",
-    "Cloud Engineer",
-    "Infrastructure Engineer",
-    "Staff Engineer",
-]
-
 # Keywords used for post-extraction title matching (case-insensitive).
 _TITLE_KEYWORDS = [
     "platform",
